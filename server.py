@@ -351,6 +351,48 @@ def concat_scenes(scene_paths: list[Path], out_path: Path) -> tuple[bool, str]:
         return False, str(e)
 
 
+WATERMARK_PATH = ROOT / "watermark.png"
+
+
+def apply_watermark(src: Path, dest: Path) -> tuple[bool, str]:
+    """Overlay a semi-transparent Not Hollywood watermark on the bottom-right corner.
+
+    ffmpeg overlay filter with a scaled logo pinned to (W-w-20, H-h-20) and reduced
+    to 55% opacity via colorchannelmixer. Re-encodes video (libx264, CRF 20, veryfast)
+    but stream-copies audio to keep the aac track intact.
+    """
+    if not WATERMARK_PATH.exists():
+        # No watermark asset present — just copy through, don't fail the render.
+        import shutil
+        shutil.copy(src, dest)
+        return True, ""
+    try:
+        # Scale the watermark to ~18% of the output width, then reduce alpha to 55%.
+        # overlay is pinned 20px from the right/bottom edges.
+        filter_complex = (
+            "[1:v]scale=iw*0.65:-1,format=rgba,colorchannelmixer=aa=0.55[wm];"
+            "[0:v][wm]overlay=W-w-20:H-h-20"
+        )
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", str(src),
+                "-i", str(WATERMARK_PATH),
+                "-filter_complex", filter_complex,
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-c:a", "copy",
+                "-movflags", "+faststart",
+                str(dest),
+            ],
+            capture_output=True, timeout=300,
+        )
+        if result.returncode != 0:
+            return False, result.stderr.decode(errors="ignore")[-400:]
+        return True, ""
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
+
+
 def _download_video(url: str, out_path: Path) -> tuple[bool, str]:
     try:
         with requests.get(url, timeout=180, stream=True) as resp:
@@ -506,16 +548,23 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
         save_jobs(JOBS)
 
     dest = VIDEOS / f"{job_id}.mp4"
+    # Combine scenes into one intermediate file (unwatermarked), then watermark
+    # as a final pass so multi-scene concat isn't slowed by re-encoding twice.
+    unwatermarked = scene_dir / "combined.mp4"
     if len(scene_paths) == 1:
-        # single scene — just move it
+        # single scene — use as-is
         try:
-            scene_paths[0].rename(dest)
+            scene_paths[0].rename(unwatermarked)
         except Exception:
             import shutil
-            shutil.copy(scene_paths[0], dest)
+            shutil.copy(scene_paths[0], unwatermarked)
         ok, err = True, ""
     else:
-        ok, err = concat_scenes(scene_paths, dest)
+        ok, err = concat_scenes(scene_paths, unwatermarked)
+
+    if ok:
+        # Apply Not Hollywood watermark as final step.
+        ok, err = apply_watermark(unwatermarked, dest)
 
     j = JOBS.get(job_id)
     if not j:
@@ -526,7 +575,7 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
         j["finished_at"] = time.time()
     else:
         j["status"] = "failed"
-        j["error"] = f"stitch failed: {err}"
+        j["error"] = f"finalize failed: {err}"
     save_jobs(JOBS)
 
 
