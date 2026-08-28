@@ -18,6 +18,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from auth import require_user, get_user
+
 # Provider: reAPI (unmoderated MiniMax H3 host).
 # Migrated from MiniMax direct on 2026-08-28. reAPI proxies to the same underlying H3
 # model with the option to disable Google-style content filtering via content_filter:false.
@@ -60,7 +62,12 @@ GROK_API_KEY = (
     os.environ.get("XAI_API_KEY", "")
     or os.environ.get("CUSTOM_CRED_API_X_AI_TOKEN", "")
 )
+# Legacy pre-auth gate. Kept as a defensive break-glass so if Supabase auth is
+# somehow bypassed we can re-enable a shared password. In normal operation
+# SITE_PASSWORD is unset and Supabase JWT auth is the sole gate.
 SITE_PASSWORD = os.environ.get("SITE_PASSWORD", "")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 # ROOT is the directory this file lives in. Works in both dev and prod sandboxes.
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -579,6 +586,22 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
     save_jobs(JOBS)
 
 
+@app.get("/api/config")
+def public_config():
+    """Frontend calls this once on load to get Supabase URL + anon key.
+
+    Both values are safe to expose (the anon key is designed to be shipped to
+    browsers and Supabase Row-Level Security is the real gate). Returning them
+    from the backend means we don't have to hard-code them in app.js and can
+    swap Supabase projects via env var without rebuilding.
+    """
+    return {
+        "supabase_url": SUPABASE_URL,
+        "supabase_anon_key": SUPABASE_ANON_KEY,
+        "auth_required": bool(SUPABASE_URL and SUPABASE_ANON_KEY),
+    }
+
+
 @app.post("/api/generate")
 async def generate(
     request: Request,
@@ -587,8 +610,15 @@ async def generate(
     resolution: str = Form("768P"),
     reference: UploadFile | None = File(None),
 ):
-    # Password gate
-    if SITE_PASSWORD:
+    # Auth gate: require a signed-in Supabase user. Falls back to the legacy
+    # shared password if SITE_PASSWORD is set (break-glass only).
+    user_id: str | None = None
+    user_email: str | None = None
+    if SUPABASE_URL:
+        claims = require_user(request)
+        user_id = claims.get("sub")
+        user_email = claims.get("email")
+    elif SITE_PASSWORD:
         supplied = request.headers.get("X-Site-Password", "")
         if supplied != SITE_PASSWORD:
             raise HTTPException(401, "password required or incorrect")
@@ -627,6 +657,8 @@ async def generate(
         "scene_status": "queued",
         "status": "queued",
         "created_at": time.time(),
+        "user_id": user_id,
+        "user_email": user_email,
     }
     save_jobs(JOBS)
     Thread(target=multi_scene_worker, args=(job_id, ref_url), daemon=True).start()
@@ -634,17 +666,38 @@ async def generate(
 
 
 @app.get("/api/jobs/{job_id}")
-def get_job(job_id: str):
+def get_job(job_id: str, request: Request):
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(404, "job not found")
+    # If Supabase auth is configured, only allow the job owner to see it.
+    # Anonymous jobs (created before auth was enabled) stay accessible for
+    # backward compat with any user still polling them.
+    if SUPABASE_URL and job.get("user_id"):
+        claims = get_user(request)
+        caller = claims.get("sub") if claims else None
+        if caller != job["user_id"]:
+            raise HTTPException(404, "job not found")
     return job
 
 
 @app.get("/api/jobs")
-def list_jobs():
-    # Return most recent first, drop internal task_id from public listing
+def list_jobs(request: Request):
+    """Return jobs owned by the caller, most recent first.
+
+    - When Supabase auth is enabled and the caller is signed in, returns only
+      that user's jobs.
+    - When Supabase auth is enabled but the caller is anonymous, returns an
+      empty list (no cross-user leakage on the anonymous homepage).
+    - When Supabase auth is not configured, returns all jobs (legacy behavior).
+    """
     items = sorted(JOBS.values(), key=lambda j: j.get("created_at", 0), reverse=True)
+    if SUPABASE_URL:
+        claims = get_user(request)
+        caller = claims.get("sub") if claims else None
+        if caller is None:
+            return []
+        items = [j for j in items if j.get("user_id") == caller]
     return [{k: v for k, v in j.items() if k != "task_id"} for j in items[:50]]
 
 

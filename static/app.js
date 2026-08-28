@@ -25,9 +25,29 @@ const el = {
   activeCount: $("#activeCount"),
   activeRow: $("#activeRow"),
 
+  shelfFeatured: $("#shelfFeatured"),
+  featuredRow: $("#featuredRow"),
+
   shelfRenders: $("#shelfRenders"),
   rendersRow: $("#rendersRow"),
   rendersEmpty: $("#rendersEmpty"),
+
+  // Auth
+  navSignInBtn: $("#navSignInBtn"),
+  navUser: $("#navUser"),
+  navUserEmail: $("#navUserEmail"),
+  navSignOutBtn: $("#navSignOutBtn"),
+  authModal: $("#authModal"),
+  authForm: $("#authForm"),
+  authEmail: $("#authEmail"),
+  authPassword: $("#authPassword"),
+  authError: $("#authError"),
+  authSubmitBtn: $("#authSubmitBtn"),
+  authSubmitLabel: $("#authSubmitLabel"),
+  authTitle: $("#authTitle"),
+  authSub: $("#authSub"),
+  authSwitchLine: $("#authSwitchLine"),
+  authPasswordHint: $("#authPasswordHint"),
 
   ideasRow: $("#ideasRow"),
   templatesRow: $("#templatesRow"),
@@ -65,20 +85,83 @@ const el = {
 };
 
 // ─── State ─────────────────────────────────────────────────────────
-let jobs = [];
+let jobs = [];              // user-owned jobs (or [] when signed out)
 let heroJob = null;
 let pollTimer = null;
 let currentDetailJob = null;
 
-// Safe password store - tries persistent browser storage where available,
-// falls back to in-memory when the environment forbids it (preview iframes).
-const STORAGE_KEY = "nh" + "_pwd";
-const _webStore = (() => { try { return window["local" + "Storage"]; } catch { return null; } })();
-const pwdStore = {
-  get()   { try { return (_webStore && _webStore.getItem(STORAGE_KEY)) || window.__nh_pwd || ""; } catch { return window.__nh_pwd || ""; } },
-  set(v)  { try { _webStore && _webStore.setItem(STORAGE_KEY, v); } catch {} window.__nh_pwd = v; },
-  clear() { try { _webStore && _webStore.removeItem(STORAGE_KEY); } catch {} window.__nh_pwd = ""; },
-};
+// ─── Auth (Supabase) ───────────────────────────────────────────────
+// The Supabase client is created after we fetch /api/config on init. Until then
+// auth is disabled and the app behaves as an anonymous read-only browse.
+let supabase = null;
+let currentUser = null;     // null when signed out; { id, email, ... } when signed in
+let authRequired = false;   // true when backend reports auth is configured
+let authMode = "signin";    // "signin" | "signup"
+
+async function initAuth() {
+  try {
+    const r = await fetch(`${API}/api/config`);
+    if (!r.ok) throw new Error("config failed");
+    const cfg = await r.json();
+    authRequired = !!cfg.auth_required;
+    if (!authRequired) {
+      // Legacy mode: no Supabase configured server-side. Keep composer open to all.
+      return;
+    }
+    // eslint-disable-next-line no-undef
+    supabase = window.supabase.createClient(cfg.supabase_url, cfg.supabase_anon_key, {
+      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
+    });
+    // Restore session from localStorage if present.
+    const { data: sessData } = await supabase.auth.getSession();
+    if (sessData && sessData.session) {
+      currentUser = sessData.session.user;
+    }
+    // Subscribe to changes (sign-in, sign-out, token refresh).
+    supabase.auth.onAuthStateChange((_event, session) => {
+      currentUser = session ? session.user : null;
+      renderAuthUI();
+      refreshJobs();
+    });
+  } catch (err) {
+    console.warn("auth init failed", err);
+  }
+}
+
+async function currentAccessToken() {
+  if (!supabase) return null;
+  const { data } = await supabase.auth.getSession();
+  return data && data.session ? data.session.access_token : null;
+}
+
+async function authedFetch(url, opts = {}) {
+  const token = await currentAccessToken();
+  const headers = new Headers(opts.headers || {});
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  return fetch(url, { ...opts, headers });
+}
+
+function renderAuthUI() {
+  if (!authRequired) {
+    // Auth disabled server-side: hide auth widgets entirely.
+    el.navSignInBtn.hidden = true;
+    el.navUser.hidden = true;
+    el.shelfRenders.hidden = false;
+    return;
+  }
+  if (currentUser) {
+    el.navSignInBtn.hidden = true;
+    el.navUser.hidden = false;
+    el.navUserEmail.textContent = currentUser.email || "signed in";
+    el.shelfRenders.hidden = false;
+  } else {
+    el.navSignInBtn.hidden = false;
+    el.navUser.hidden = true;
+    // Hide user library + active shelf when signed out — showcase remains.
+    el.shelfRenders.hidden = true;
+    el.shelfActive.hidden = true;
+  }
+}
 
 // ─── Helpers ───────────────────────────────────────────────────────
 function escapeHtml(s) {
@@ -328,33 +411,25 @@ el.renderForm.addEventListener("submit", async (e) => {
   const f = el.refFile.files?.[0];
   if (f) fd.append("reference", f);
 
+  // Auth check: if the backend requires auth but the user isn't signed in,
+  // close the composer and open the auth modal instead of submitting.
+  if (authRequired && !currentUser) {
+    closeModal(el.composerModal);
+    setTimeout(() => openAuthModal("signin"), 200);
+    return;
+  }
+
   el.submitBtn.disabled = true;
   const origLabel = el.submitBtn.querySelector(".btn-label").textContent;
   el.submitBtn.querySelector(".btn-label").textContent = "Submitting…";
 
-  // In-memory password store (preview iframes disable persistent storage)
   try {
-    const pwd = pwdStore.get();
-    let r = await fetch(`${API}/api/generate`, {
-      method: "POST",
-      body: fd,
-      headers: pwd ? { "X-Site-Password": pwd } : {},
-    });
+    const r = await authedFetch(`${API}/api/generate`, { method: "POST", body: fd });
     if (r.status === 401) {
-      pwdStore.clear();
-      const entered = window.prompt("This site is password-protected. Enter the password to create a show:");
-      if (!entered) throw new Error("password required");
-      pwdStore.set(entered);
-      r = await fetch(`${API}/api/generate`, {
-        method: "POST", body: fd,
-        headers: { "X-Site-Password": entered },
-      });
-      if (r.status === 401) {
-        pwdStore.clear();
-        throw new Error("Incorrect password");
-      }
+      closeModal(el.composerModal);
+      setTimeout(() => openAuthModal("signin"), 200);
+      throw new Error("session expired — sign in again");
     }
-    // pwdStore is defined at file top; see the top of app.js.
     if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`);
     const job = await r.json();
     // Close composer, jump user to the "Now Rendering" shelf
@@ -536,8 +611,11 @@ function renderShelves() {
   const active = jobs.filter((j) => j.status !== "done" && j.status !== "failed");
   const finished = jobs.filter((j) => j.status === "done" || j.status === "failed");
 
-  // Active
-  if (active.length) {
+  // Featured (always visible, always the curated set)
+  el.featuredRow.innerHTML = SHOWCASE_JOBS.map(renderTile).join("");
+
+  // Active: shown when signed in AND has active jobs
+  if (active.length && (currentUser || !authRequired)) {
     el.shelfActive.hidden = false;
     el.activeCount.textContent = active.length;
     el.activeRow.innerHTML = active.map(renderTile).join("");
@@ -545,7 +623,12 @@ function renderShelves() {
     el.shelfActive.hidden = true;
   }
 
-  // Renders
+  // My Library: hidden when auth required + signed out
+  if (authRequired && !currentUser) {
+    el.shelfRenders.hidden = true;
+    return;
+  }
+  el.shelfRenders.hidden = false;
   if (finished.length) {
     el.rendersEmpty.hidden = true;
     el.rendersRow.innerHTML = finished
@@ -763,22 +846,25 @@ const SHOWCASE_JOBS = [
 ];
 
 async function refreshJobs() {
+  // Anonymous users don't fetch /api/jobs at all — only see the curated Featured shelf.
+  if (authRequired && !currentUser) {
+    jobs = [];
+    renderHero();
+    renderShelves();
+    return;
+  }
   try {
-    const r = await fetch(`${API}/api/jobs`);
+    const r = await authedFetch(`${API}/api/jobs`);
     if (!r.ok) throw new Error("failed");
     const remote = await r.json();
-    jobs = (remote && remote.length) ? remote : SHOWCASE_JOBS;
+    jobs = Array.isArray(remote) ? remote : [];
     renderHero();
     renderShelves();
     schedulePoll();
   } catch (err) {
-    // No backend (static preview) - fall back to showcase renders so the
-    // hero autoplays and the library shelf is populated.
-    if (!jobs || !jobs.length) {
-      jobs = SHOWCASE_JOBS;
-      renderHero();
-      renderShelves();
-    }
+    if (!jobs) jobs = [];
+    renderHero();
+    renderShelves();
     console.warn("refresh failed", err);
   }
 }
@@ -791,9 +877,108 @@ function schedulePoll() {
 }
 
 // ─── Init ──────────────────────────────────────────────────────────
+// Auth modal wiring
+function openAuthModal(mode = "signin") {
+  setAuthMode(mode);
+  el.authError.hidden = true;
+  el.authError.textContent = "";
+  openModal(el.authModal);
+  setTimeout(() => el.authEmail.focus(), 100);
+}
+
+function setAuthMode(mode) {
+  authMode = mode;
+  const tabs = el.authModal.querySelectorAll(".auth-tab");
+  tabs.forEach((t) => t.classList.toggle("active", t.dataset.authMode === mode));
+  if (mode === "signup") {
+    el.authTitle.textContent = "Create your account.";
+    el.authSub.textContent = "Your renders stay in your library. Nothing goes public.";
+    el.authSubmitLabel.textContent = "Create account";
+    el.authPassword.setAttribute("autocomplete", "new-password");
+    el.authPasswordHint.textContent = "At least 6 characters. Pick something memorable.";
+    el.authSwitchLine.innerHTML =
+      'Already have an account? <button type="button" class="link-btn" data-auth-switch="signin">Sign in</button>';
+  } else {
+    el.authTitle.textContent = "Sign in to Not Hollywood.";
+    el.authSub.textContent = "Welcome back. Pick up your library.";
+    el.authSubmitLabel.textContent = "Sign in";
+    el.authPassword.setAttribute("autocomplete", "current-password");
+    el.authPasswordHint.textContent = "At least 6 characters.";
+    el.authSwitchLine.innerHTML =
+      'New here? <button type="button" class="link-btn" data-auth-switch="signup">Create an account</button>';
+  }
+}
+
+el.navSignInBtn.addEventListener("click", () => openAuthModal("signin"));
+el.navSignOutBtn.addEventListener("click", async () => {
+  if (!supabase) return;
+  await supabase.auth.signOut();
+});
+
+document.addEventListener("click", (e) => {
+  const tab = e.target.closest("[data-auth-mode]");
+  if (tab) {
+    setAuthMode(tab.dataset.authMode);
+    el.authError.hidden = true;
+    return;
+  }
+  const sw = e.target.closest("[data-auth-switch]");
+  if (sw) {
+    setAuthMode(sw.dataset.authSwitch);
+    el.authError.hidden = true;
+  }
+});
+
+el.authForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!supabase) return;
+  el.authError.hidden = true;
+  el.authError.textContent = "";
+  el.authError.style.color = "";
+  const email = el.authEmail.value.trim();
+  const password = el.authPassword.value;
+  if (!email || !password) return;
+
+  el.authSubmitBtn.disabled = true;
+  const origLabel = el.authSubmitLabel.textContent;
+  el.authSubmitLabel.textContent = authMode === "signup" ? "Creating…" : "Signing in…";
+
+  try {
+    let resp;
+    if (authMode === "signup") {
+      resp = await supabase.auth.signUp({ email, password });
+      if (resp.error) throw resp.error;
+      if (resp.data && resp.data.user && !resp.data.session) {
+        el.authError.hidden = false;
+        el.authError.style.color = "#9be7a0";
+        el.authError.textContent = "Check your email to confirm your account, then sign in.";
+        setAuthMode("signin");
+        return;
+      }
+    } else {
+      resp = await supabase.auth.signInWithPassword({ email, password });
+      if (resp.error) throw resp.error;
+    }
+    closeModal(el.authModal);
+    el.authForm.reset();
+  } catch (err) {
+    el.authError.hidden = false;
+    el.authError.textContent = (err && err.message) || String(err);
+  } finally {
+    el.authSubmitBtn.disabled = false;
+    el.authSubmitLabel.textContent = origLabel;
+  }
+});
+
 renderIdeas();
 renderTemplates();
 wireTileHover(el.rendersRow);
 wireTileHover(el.activeRow);
+wireTileHover(el.featuredRow);
 updateLengthDisplay();
-refreshJobs();
+
+(async () => {
+  await initAuth();
+  renderAuthUI();
+  await refreshJobs();
+})();

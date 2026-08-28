@@ -9,6 +9,8 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link rel="stylesheet" href="styles.css" />
+    <!-- Supabase JS v2 (browser bundle). Auth only — no direct DB access from the browser. -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   </head>
   <body>
     <!-- ═══════════════════════════════════════════════════════════════════
@@ -27,6 +29,12 @@
           <button class="nav-search" id="searchBtn" aria-label="Search">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
           </button>
+          <!-- Auth widgets: swap between signed-out CTA and user chip -->
+          <button class="btn-secondary nav-auth-btn" id="navSignInBtn" hidden>Sign in</button>
+          <div class="nav-user" id="navUser" hidden>
+            <span class="nav-user-email" id="navUserEmail"></span>
+            <button class="btn-secondary nav-signout" id="navSignOutBtn">Sign out</button>
+          </div>
           <button class="btn-primary" id="openComposerBtn">
             <span class="btn-plus">+</span> Create a Show
           </button>
@@ -94,14 +102,22 @@
         <div class="shelf-scroll" id="activeRow"></div>
       </section>
 
-      <!-- Your Renders -->
-      <section class="shelf" id="shelfRenders">
+      <!-- Featured (curated showcase clips — same for everyone, always visible) -->
+      <section class="shelf" id="shelfFeatured">
         <div class="shelf-head">
           <h2>Featured</h2>
+          <span class="shelf-sub">Curated by Not Hollywood</span>
+        </div>
+        <div class="shelf-scroll" id="featuredRow"></div>
+      </section>
+
+      <!-- My Library (only visible when signed in — user's own renders) -->
+      <section class="shelf" id="shelfRenders" hidden>
+        <div class="shelf-head">
+          <h2>My Library</h2>
           <span class="shelf-sub shelf-sub-warn">Download to keep — we don't store videos</span>
         </div>
         <div class="shelf-scroll" id="rendersRow">
-          <!-- empty state -->
           <div class="empty-shelf" id="rendersEmpty" hidden>
             <p>No shows yet. Your first scene lives on the other side of that <b>Create a Show</b> button.</p>
           </div>
@@ -237,7 +253,7 @@
             <span><b>Heads up — we don't store your videos.</b> Download it as soon as it finishes rendering, or it may disappear on our next deploy.</span>
           </p>
           <p class="submit-note">
-            Password required on first submit · By creating a show you agree not to generate content impersonating a real person without consent
+            Sign in required · By creating a show you agree not to generate content impersonating a real person without consent
           </p>
         </form>
       </div>
@@ -268,6 +284,46 @@
             We don't store your videos — download now to keep this one.
           </p>
         </div>
+      </div>
+    </div>
+
+    <!-- ═════════════════════════════════════════════════════════════════════════════
+         AUTH MODAL (sign in / sign up)
+         ════════════════════════════════════════════════════════════════════════════ -->
+    <div class="modal" id="authModal" hidden aria-hidden="true">
+      <div class="modal-backdrop" data-close></div>
+      <div class="modal-card auth-card" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+        <button class="modal-close" data-close aria-label="Close">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M6 18L18 6"/></svg>
+        </button>
+        <div class="auth-head">
+          <p class="composer-eyebrow">Access the studio</p>
+          <h2 id="authTitle" class="composer-title">Sign in to Not Hollywood.</h2>
+          <p class="composer-sub" id="authSub">Your renders stay in your library. Nothing goes public.</p>
+        </div>
+        <div class="auth-tabs" role="tablist">
+          <button type="button" class="auth-tab active" data-auth-mode="signin" role="tab">Sign in</button>
+          <button type="button" class="auth-tab" data-auth-mode="signup" role="tab">Create account</button>
+        </div>
+        <form id="authForm" class="composer-form auth-form" novalidate>
+          <div class="field">
+            <label class="field-label" for="authEmail">Email</label>
+            <input type="email" id="authEmail" name="email" autocomplete="email" required />
+          </div>
+          <div class="field">
+            <label class="field-label" for="authPassword">Password</label>
+            <input type="password" id="authPassword" name="password" autocomplete="current-password" minlength="6" required />
+            <div class="field-hint" id="authPasswordHint">At least 6 characters.</div>
+          </div>
+          <div class="auth-error" id="authError" hidden></div>
+          <button type="submit" class="btn-render" id="authSubmitBtn">
+            <span class="btn-label" id="authSubmitLabel">Sign in</span>
+            <span class="btn-arrow">→</span>
+          </button>
+          <p class="submit-note" id="authSwitchLine">
+            New here? <button type="button" class="link-btn" data-auth-switch="signup">Create an account</button>
+          </p>
+        </form>
       </div>
     </div>
 
