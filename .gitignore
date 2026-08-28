@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+env/
+*.egg-info/
+
+# Secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Runtime state (regenerated per-deploy; persist via Supabase later)
+jobs.json
+static/videos/
+static/thumbs/
+scenes/
+uploaded_attachments/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# QA screenshots
+qa-*.png
+*.log
