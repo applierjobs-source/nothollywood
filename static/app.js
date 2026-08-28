@@ -499,6 +499,9 @@ function renderTile(job) {
       <video class="tile-video" src="${escapeHtml(job.video)}#t=0.8" muted preload="metadata" playsinline></video>
       <div class="tile-gradient"></div>
       <span class="tile-badge">${escapeHtml(formatDuration(job.duration))}</span>
+      <button class="tile-download" data-download="1" data-url="${escapeHtml(job.video)}" data-id="${escapeHtml(job.id)}" title="Download" aria-label="Download video">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12"/><path d="M6 12l6 6 6-6"/><path d="M5 21h14"/></svg>
+      </button>
       <div class="tile-play">
         <svg viewBox="0 0 24 24" fill="white"><path d="M8 5v14l11-7z"/></svg>
       </div>
@@ -556,12 +559,51 @@ function renderShelves() {
 
 // ─── Tile click wiring (delegated) ─────────────────────────────────
 document.addEventListener("click", (e) => {
+  // Download button — handle first so it wins over tile-open
+  const dl = e.target.closest("[data-download]");
+  if (dl) {
+    e.stopPropagation();
+    e.preventDefault();
+    const url = dl.dataset.url;
+    const id = dl.dataset.id || "clip";
+    if (!url) return;
+    downloadVideo(url, `nothollywood-${id}.mp4`);
+    return;
+  }
   const tile = e.target.closest(".tile[data-id]");
   if (!tile) return;
   if (tile.dataset.open !== "1") return;
   const job = jobs.find((j) => j.id === tile.dataset.id);
   if (job) openDetail(job);
 });
+
+// Force a real download (fetch as blob so browsers don't just play the mp4)
+async function downloadVideo(url, filename) {
+  try {
+    const res = await fetch(url, { credentials: "same-origin" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const objUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(objUrl), 1500);
+  } catch (err) {
+    // Fallback: open in a new tab (user can right-click → save)
+    console.warn("Blob download failed, falling back to link", err);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.target = "_blank";
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+}
 
 // ─── Ideas shelf (curated prompts) ─────────────────────────────────
 const IDEAS = [

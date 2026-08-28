@@ -98,6 +98,7 @@
       <section class="shelf" id="shelfRenders">
         <div class="shelf-head">
           <h2>Featured</h2>
+          <span class="shelf-sub shelf-sub-warn">Download to keep — we don't store videos</span>
         </div>
         <div class="shelf-scroll" id="rendersRow">
           <!-- empty state -->
@@ -231,6 +232,10 @@
             <span class="btn-label">Send to the machines</span>
             <span class="btn-arrow">→</span>
           </button>
+          <p class="submit-note storage-warning">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 9v4"/><path d="M12 17h.01"/><circle cx="12" cy="12" r="10"/></svg>
+            <span><b>Heads up — we don't store your videos.</b> Download it as soon as it finishes rendering, or it may disappear on our next deploy.</span>
+          </p>
           <p class="submit-note">
             Password required on first submit · By creating a show you agree not to generate content impersonating a real person without consent
           </p>
@@ -259,6 +264,9 @@
             <a class="btn-primary" id="detailDownload" download>Download MP4</a>
             <button class="btn-secondary" id="detailRemix">Remix this prompt</button>
           </div>
+          <p class="detail-storage-note">
+            We don't store your videos — download now to keep this one.
+          </p>
         </div>
       </div>
     </div>

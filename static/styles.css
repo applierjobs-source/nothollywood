@@ -1294,6 +1294,104 @@ textarea::placeholder { color: var(--text-faint); }
   border-radius: 4px;
   background: rgba(255,255,255,0.03);
 }
+
+/* Storage warning styles — "we don't store your videos" */
+.detail-storage-note {
+  margin-top: 14px;
+  font-size: 12px;
+  color: var(--accent-warm, #f5b544);
+  letter-spacing: 0.02em;
+  opacity: 0.95;
+}
+
+/* Storage warning under composer submit */
+.submit-note.storage-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  margin-top: 12px;
+  margin-bottom: 6px;
+  background: rgba(245, 181, 68, 0.08);
+  border: 1px solid rgba(245, 181, 68, 0.28);
+  border-radius: 8px;
+  color: #f5b544;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.submit-note.storage-warning svg {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+}
+.submit-note.storage-warning b { color: #ffc86b; }
+
+/* Subtle warn variant of shelf-sub */
+.shelf-sub.shelf-sub-warn {
+  color: #f5b544;
+  opacity: 0.85;
+}
+
+/* Tile download button (top-right corner) */
+.tile-download {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(10, 10, 12, 0.62);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(-2px);
+  transition: opacity 160ms ease, transform 160ms ease, background 160ms ease;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  z-index: 3;
+}
+.tile-download svg {
+  width: 16px;
+  height: 16px;
+}
+.tile:hover .tile-download,
+.tile:focus-within .tile-download {
+  opacity: 1;
+  transform: translateY(0);
+}
+.tile-download:hover {
+  background: rgba(245, 181, 68, 0.95);
+  color: #0a0a0c;
+}
+.tile-download:focus-visible {
+  outline: 2px solid #f5b544;
+  outline-offset: 2px;
+  opacity: 1;
+}
+
+/* Touch devices: always show, no hover */
+@media (hover: none) {
+  .tile-download {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   FOOTER
+   ══════════════════════════════════════════════════════════════════════ */
+.page-footer {
+  padding: 40px var(--page-x) 0;
+  color: var(--text-mute);
+  font-size: 12px;
+  line-height: 1.6;
+}
 .detail-prompt {
   background: var(--bg-elev-2);
   border-left: 3px solid var(--signal);
