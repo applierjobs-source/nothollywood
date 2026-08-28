@@ -19,7 +19,7 @@ def build_watermark(out: Path = Path(__file__).parent / "watermark.png") -> None
     font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
     font = ImageFont.truetype(font_path, 72)
 
-    text = "NOT HOLLYWOOD"
+    text = "NotHollywood.ai"
     bbox = d.textbbox((0, 0), text, font=font)
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
