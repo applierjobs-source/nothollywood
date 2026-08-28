@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 BASE = "https://api.minimax.io/v2"
+GROK_BASE = "https://api.x.ai/v1"
 
 
 def _load_env_file() -> None:
@@ -39,6 +40,13 @@ _load_env_file()
 API_KEY = (
     os.environ.get("MINIMAX_API_KEY", "")
     or os.environ.get("CUSTOM_CRED_API_MINIMAX_IO_TOKEN", "")
+)
+# Grok Imagine fallback: kicks in when MiniMax flags a prompt as sensitive.
+# XAI_API_KEY: direct env var or
+# CUSTOM_CRED_API_X_AI_TOKEN: publish_website credential proxy
+GROK_API_KEY = (
+    os.environ.get("XAI_API_KEY", "")
+    or os.environ.get("CUSTOM_CRED_API_X_AI_TOKEN", "")
 )
 SITE_PASSWORD = os.environ.get("SITE_PASSWORD", "")
 # ROOT is the directory this file lives in. Works in both dev and prod sandboxes.
@@ -74,6 +82,97 @@ JOBS: dict = load_jobs()
 
 def headers() -> dict:
     return {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+
+
+def grok_headers() -> dict:
+    return {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
+
+
+# Substrings that indicate MiniMax rejected the prompt for policy reasons
+# (rather than a transient failure). Any of these triggers Grok fallback.
+_SENSITIVE_MARKERS = (
+    "sensitive",           # 'input new_sensitive, input text sensitive'
+    "content policy",
+    "policy violation",
+    "prohibited",
+    "not allowed",
+)
+
+
+def _is_sensitive_error(err: str) -> bool:
+    if not err:
+        return False
+    low = err.lower()
+    return any(m in low for m in _SENSITIVE_MARKERS)
+
+
+# Map MiniMax durations (4/6/8/10) to Grok Imagine durations (5-15s).
+# Grok's minimum is 5s, so anything <=5 becomes 6.
+def _grok_duration(minimax_duration: int) -> int:
+    if minimax_duration <= 5:
+        return 6
+    if minimax_duration > 15:
+        return 15
+    return minimax_duration
+
+
+def submit_grok(prompt: str, duration: int, resolution: str, ref_data_url: str | None) -> tuple[str | None, str | None]:
+    """Submit a video generation request to Grok Imagine Video 1.5.
+
+    Returns (request_id, error).
+    """
+    if not GROK_API_KEY:
+        return None, "grok api key not configured"
+    body: dict = {
+        "model": "grok-imagine-video-1.5",
+        "prompt": prompt,
+        "duration": _grok_duration(duration),
+        "resolution": "720p",
+        "aspect_ratio": "16:9",
+    }
+    if ref_data_url:
+        body["image_url"] = ref_data_url
+    try:
+        r = requests.post(f"{GROK_BASE}/videos/generations", headers=grok_headers(), json=body, timeout=60)
+    except Exception as e:  # noqa: BLE001
+        return None, f"grok network error: {e}"
+    if r.status_code != 200:
+        return None, f"grok http {r.status_code}: {r.text[:400]}"
+    data = r.json()
+    rid = data.get("request_id") or data.get("id")
+    if not rid:
+        return None, f"grok no request_id in response: {data}"
+    return rid, None
+
+
+def fetch_grok(request_id: str) -> dict:
+    """Poll a Grok Imagine job. Normalizes response to look like MiniMax's task shape:
+    {status: 'succeeded'|'failed'|'running', content: {url: ...}, error: {message: ...}}
+    """
+    try:
+        r = requests.get(f"{GROK_BASE}/videos/{request_id}", headers=grok_headers(), timeout=30)
+    except Exception:
+        return {}
+    if r.status_code != 200:
+        return {}
+    d = r.json()
+    status = (d.get("status") or "").lower()
+    # Grok uses 'done'/'succeeded' terminology; normalize
+    if status in ("done", "succeeded", "completed"):
+        norm_status = "succeeded"
+    elif status in ("failed", "error", "cancelled"):
+        norm_status = "failed"
+    else:
+        norm_status = "running"
+    url = d.get("video_url") or d.get("url") or (d.get("video") or {}).get("url")
+    err_msg = d.get("error") or d.get("message") or ""
+    if isinstance(err_msg, dict):
+        err_msg = err_msg.get("message", "")
+    return {
+        "status": norm_status,
+        "content": {"url": url} if url else {},
+        "error": {"message": err_msg} if err_msg else {},
+    }
 
 
 def encode_image_bytes(raw: bytes, mime: str = "image/png") -> str:
@@ -188,6 +287,48 @@ def concat_scenes(scene_paths: list[Path], out_path: Path) -> tuple[bool, str]:
         return False, str(e)
 
 
+def _download_video(url: str, out_path: Path) -> tuple[bool, str]:
+    try:
+        with requests.get(url, timeout=180, stream=True) as resp:
+            resp.raise_for_status()
+            with open(out_path, "wb") as fp:
+                for chunk in resp.iter_content(chunk_size=1 << 20):
+                    fp.write(chunk)
+        return True, ""
+    except Exception as e:  # noqa: BLE001
+        return False, f"download failed: {e}"
+
+
+def _render_with_grok(
+    scene_prompt: str,
+    duration: int,
+    resolution: str,
+    ref_data_url: str | None,
+    scene_out_path: Path,
+    on_status,
+) -> tuple[bool, str]:
+    """Grok Imagine fallback path. Mirrors _render_with_minimax's control flow."""
+    on_status("grok_submitting")
+    request_id, err = submit_grok(scene_prompt, duration, resolution, ref_data_url)
+    if not request_id:
+        return False, err or "grok submit failed"
+    start = time.time()
+    max_wait = 8 * 60
+    while time.time() - start < max_wait:
+        time.sleep(10)
+        task = fetch_grok(request_id)
+        status = task.get("status", "running")
+        on_status(f"grok_{status}")
+        if status == "succeeded":
+            url = (task.get("content") or {}).get("url")
+            if not url:
+                return False, "grok returned no url"
+            return _download_video(url, scene_out_path)
+        if status == "failed":
+            return False, "grok: " + (task.get("error") or {}).get("message", "generation failed")
+    return False, "grok scene timed out after 8 minutes"
+
+
 def render_one_scene(
     scene_prompt: str,
     duration: int,
@@ -196,13 +337,18 @@ def render_one_scene(
     scene_out_path: Path,
     on_status,
 ) -> tuple[bool, str]:
-    """Submit one H3 job, poll it, download to scene_out_path.
+    """Submit one scene to MiniMax H3; on sensitivity rejection, fall back to Grok Imagine.
 
     on_status(status: str) called periodically for UI updates.
     Returns (ok, error).
     """
     task_id, err = submit_h3(scene_prompt, duration, resolution, ref_data_url)
     if not task_id:
+        # Submit itself failed. If it's a sensitivity rejection, try Grok directly.
+        if _is_sensitive_error(err or "") and GROK_API_KEY:
+            return _render_with_grok(
+                scene_prompt, duration, resolution, ref_data_url, scene_out_path, on_status
+            )
         return False, err or "submit failed"
 
     start = time.time()
@@ -216,17 +362,15 @@ def render_one_scene(
             url = (task.get("content") or {}).get("url")
             if not url:
                 return False, "no url returned"
-            try:
-                with requests.get(url, timeout=180, stream=True) as resp:
-                    resp.raise_for_status()
-                    with open(scene_out_path, "wb") as fp:
-                        for chunk in resp.iter_content(chunk_size=1 << 20):
-                            fp.write(chunk)
-                return True, ""
-            except Exception as e:  # noqa: BLE001
-                return False, f"download failed: {e}"
+            return _download_video(url, scene_out_path)
         if status == "failed":
-            return False, (task.get("error") or {}).get("message", "generation failed")
+            mm_err = (task.get("error") or {}).get("message", "generation failed")
+            # MiniMax refused for policy reasons - retry with Grok Imagine.
+            if _is_sensitive_error(mm_err) and GROK_API_KEY:
+                return _render_with_grok(
+                    scene_prompt, duration, resolution, ref_data_url, scene_out_path, on_status
+                )
+            return False, mm_err
     return False, "scene timed out after 8 minutes"
 
 
