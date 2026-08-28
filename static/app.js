@@ -437,38 +437,22 @@ function pickHeroJob(list) {
   return rich || finished[0] || null;
 }
 function renderHero() {
-  const job = pickHeroJob(jobs);
-  heroJob = job;
-  if (!job) {
-    el.hero.classList.remove("rendering");
-    el.heroEyebrow.textContent = "The Studio";
-    el.heroTitle.innerHTML = "Turn Anything<br/>You can Imagine<br/>Into a Show";
-    el.heroVideo.removeAttribute("src");
-    el.heroPlayBtn.querySelector("span").textContent = "Create a Show";
-    el.heroPlayBtn.onclick = () => openComposer();
-    el.heroInfoBtn.style.display = "none";
-    return;
-  }
-  const isActive = job.status !== "done" && job.status !== "failed";
-  el.hero.classList.toggle("rendering", isActive);
-  // Tagline is the permanent hero title - never overwritten by a render's prompt.
-  el.heroEyebrow.textContent = isActive ? "Rendering Now" : "Now Streaming";
+  // Hero is permanently pinned to the first showcase clip.
+  // User renders never take over the hero; they appear on the shelves below.
+  heroJob = null;
+  el.hero.classList.remove("rendering");
+  el.heroEyebrow.textContent = "The Studio";
   el.heroTitle.innerHTML = "Turn Anything<br/>You can Imagine<br/>Into a Show";
-  // meta chips, synopsis, and info button intentionally left hidden for a cleaner hero
   el.heroInfoBtn.style.display = "none";
-  if (job.video) {
-    if (el.heroVideo.getAttribute("src") !== job.video) {
-      el.heroVideo.src = job.video;
-      el.heroVideo.load();
-    }
-    el.heroPlayBtn.querySelector("span").textContent = "Create a Show";
-    el.heroPlayBtn.onclick = () => openComposer();
-  } else {
-    el.heroVideo.removeAttribute("src");
-    el.heroPlayBtn.querySelector("span").textContent = "Create a Show";
-    el.heroPlayBtn.onclick = () => openComposer();
+  const heroClip = (typeof SHOWCASE_JOBS !== "undefined" && SHOWCASE_JOBS[0] && SHOWCASE_JOBS[0].video)
+    ? SHOWCASE_JOBS[0].video
+    : "static/showcase/showcase_sitcom.mp4";
+  if (el.heroVideo.getAttribute("src") !== heroClip) {
+    el.heroVideo.src = heroClip;
+    el.heroVideo.load();
   }
-  el.heroInfoBtn.onclick = () => openDetail(job);
+  el.heroPlayBtn.querySelector("span").textContent = "Create a Show";
+  el.heroPlayBtn.onclick = () => openComposer();
 }
 
 // ─── Rendering: shelves ────────────────────────────────────────────
