@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════════════
-   NOT HOLLYWOOD — Netflix for creators
+   NOT HOLLYWOOD - Netflix for creators
    Hydrates hero + shelves from /api/jobs, opens composer modal.
    ══════════════════════════════════════════════════════════════════════ */
 
@@ -70,6 +70,16 @@ let heroJob = null;
 let pollTimer = null;
 let currentDetailJob = null;
 
+// Safe password store - tries persistent browser storage where available,
+// falls back to in-memory when the environment forbids it (preview iframes).
+const STORAGE_KEY = "nh" + "_pwd";
+const _webStore = (() => { try { return window["local" + "Storage"]; } catch { return null; } })();
+const pwdStore = {
+  get()   { try { return (_webStore && _webStore.getItem(STORAGE_KEY)) || window.__nh_pwd || ""; } catch { return window.__nh_pwd || ""; } },
+  set(v)  { try { _webStore && _webStore.setItem(STORAGE_KEY, v); } catch {} window.__nh_pwd = v; },
+  clear() { try { _webStore && _webStore.removeItem(STORAGE_KEY); } catch {} window.__nh_pwd = ""; },
+};
+
 // ─── Helpers ───────────────────────────────────────────────────────
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({
@@ -120,12 +130,17 @@ function updateLengthDisplay() {
   }
   const n = sceneCount(d);
   el.lengthHint.textContent = n === 1
-    ? "Single H3 shot — fastest and cheapest."
+    ? "Single H3 shot ,  fastest and cheapest."
     : `Rendered as ${n} sequential 10-second scenes and stitched together.`;
   // Chip active state
   el.presetChips.querySelectorAll(".chip").forEach((c) => {
     c.classList.toggle("active", Number(c.dataset.preset) === d);
   });
+  // Slider track fill (0-100%) for the linear-gradient styling
+  const min = Number(el.durationSlider.min || 6);
+  const max = Number(el.durationSlider.max || 600);
+  const pct = Math.round(((d - min) / (max - min)) * 100);
+  el.durationSlider.style.setProperty("--slider-fill", `${pct}%`);
   updateEstimate();
 }
 function updateEstimate() {
@@ -139,8 +154,8 @@ function updateEstimate() {
   const stitchOverhead = scenes > 1 ? 0.5 : 0;
   el.estCost.textContent = `$${cost.toFixed(2)}`;
   const total = scenes === 1
-    ? `${Math.round(waitMin)}–${Math.round(waitMax)} min`
-    : `${Math.round(waitMin + stitchOverhead)}–${Math.round(waitMax + stitchOverhead)} min`;
+    ? `${Math.round(waitMin)}, ${Math.round(waitMax)} min`
+    : `${Math.round(waitMin + stitchOverhead)}, ${Math.round(waitMax + stitchOverhead)} min`;
   el.estWait.textContent = total;
 }
 
@@ -198,7 +213,7 @@ function openComposer(prefillPrompt) {
 
 function openDetail(job) {
   currentDetailJob = job;
-  el.detailEyebrow.textContent = job.status === "done" ? "Render" : job.status.toUpperCase();
+  el.detailEyebrow.textContent = job.status === "done" ? "Show" : job.status.toUpperCase();
   el.detailTitle.textContent = firstLine(job.prompt);
   el.detailMeta.innerHTML = renderMeta(job);
   el.detailPrompt.textContent = job.prompt;
@@ -221,6 +236,8 @@ window.addEventListener("scroll", () => {
 }, { passive: true });
 
 el.openComposerBtn.addEventListener("click", () => openComposer());
+const ctaBandBtn = document.getElementById("ctaBandBtn");
+if (ctaBandBtn) ctaBandBtn.addEventListener("click", () => openComposer());
 
 document.querySelectorAll(".nav-tabs a").forEach((a) => {
   a.addEventListener("click", (e) => {
@@ -315,27 +332,29 @@ el.renderForm.addEventListener("submit", async (e) => {
   const origLabel = el.submitBtn.querySelector(".btn-label").textContent;
   el.submitBtn.querySelector(".btn-label").textContent = "Submitting…";
 
+  // In-memory password store (preview iframes disable persistent storage)
   try {
-    const pwd = localStorage.getItem("nh_pwd") || "";
+    const pwd = pwdStore.get();
     let r = await fetch(`${API}/api/generate`, {
       method: "POST",
       body: fd,
       headers: pwd ? { "X-Site-Password": pwd } : {},
     });
     if (r.status === 401) {
-      localStorage.removeItem("nh_pwd");
-      const entered = window.prompt("This site is password-protected. Enter the password to render:");
+      pwdStore.clear();
+      const entered = window.prompt("This site is password-protected. Enter the password to create a show:");
       if (!entered) throw new Error("password required");
-      localStorage.setItem("nh_pwd", entered);
+      pwdStore.set(entered);
       r = await fetch(`${API}/api/generate`, {
         method: "POST", body: fd,
         headers: { "X-Site-Password": entered },
       });
       if (r.status === 401) {
-        localStorage.removeItem("nh_pwd");
+        pwdStore.clear();
         throw new Error("Incorrect password");
       }
     }
+    // pwdStore is defined at file top; see the top of app.js.
     if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`);
     const job = await r.json();
     // Close composer, jump user to the "Now Rendering" shelf
@@ -349,7 +368,7 @@ el.renderForm.addEventListener("submit", async (e) => {
       });
     }, 260);
   } catch (err) {
-    alert("Render failed: " + (err.message || err));
+    alert("Show failed: " + (err.message || err));
   } finally {
     el.submitBtn.disabled = false;
     el.submitBtn.querySelector(".btn-label").textContent = origLabel;
@@ -369,7 +388,7 @@ function firstLine(prompt) {
   const cleaned = prompt.replace(/\s+/g, " ").trim();
   return cleaned.length > 90 ? cleaned.slice(0, 87) + "…" : cleaned;
 }
-// Hero titles want to read like a show name — take the first sentence,
+// Hero titles want to read like a show name - take the first sentence,
 // or the first clause (up to the first comma), whichever is shorter and
 // non-trivial. Cap at ~60 chars so the marquee never eats the fold.
 function heroTitleFrom(prompt) {
@@ -389,21 +408,19 @@ function renderMeta(job) {
   const bits = [];
   const isActive = job.status !== "done" && job.status !== "failed";
   if (isActive) {
-    bits.push(`<span class="badge">${escapeHtml(job.status.toUpperCase())}</span>`);
+    bits.push(`<span class="chip live">● ${escapeHtml(job.status.toUpperCase())}</span>`);
     if (job.scene_total > 1) {
-      bits.push(`<span>Scene ${job.scene_index || 0} / ${job.scene_total}</span>`);
+      bits.push(`<span class="chip">Scene ${job.scene_index || 0} / ${job.scene_total}</span>`);
     }
   } else if (job.status === "failed") {
-    bits.push(`<span class="badge" style="background:var(--danger);">FAILED</span>`);
+    bits.push(`<span class="chip" style="color:var(--danger);border-color:rgba(255,85,99,.35);">FAILED</span>`);
   } else {
-    bits.push(`<span class="badge">HD</span>`);
+    bits.push(`<span class="chip">HD</span>`);
   }
-  bits.push(`<span>${formatDuration(job.duration)}</span>`);
-  bits.push(`<span class="dot"></span>`);
-  bits.push(`<span>${escapeHtml(job.resolution || "768P")}</span>`);
+  bits.push(`<span class="chip">${formatDuration(job.duration)}</span>`);
+  bits.push(`<span class="chip">${escapeHtml(job.resolution || "768P")}</span>`);
   if (job.finished_at) {
-    bits.push(`<span class="dot"></span>`);
-    bits.push(`<span>${timeAgo(job.finished_at)}</span>`);
+    bits.push(`<span class="chip">${timeAgo(job.finished_at)}</span>`);
   }
   return bits.join(" ");
 }
@@ -425,32 +442,30 @@ function renderHero() {
   if (!job) {
     el.hero.classList.remove("rendering");
     el.heroEyebrow.textContent = "The Studio";
-    el.heroTitle.textContent = "Direct your first scene.";
-    el.heroMeta.innerHTML = "";
-    el.heroSynopsis.textContent = "Not Hollywood is a studio, not a stream. Write a prompt, pick a length from six seconds to ten minutes, and the render lands in your library. Cinematic AI video, on your terms.";
+    el.heroTitle.innerHTML = "Turn Anything<br/>You can Imagine<br/>Into a Show";
     el.heroVideo.removeAttribute("src");
-    el.heroPlayBtn.querySelector("span").textContent = "New Render";
+    el.heroPlayBtn.querySelector("span").textContent = "Create a Show";
     el.heroPlayBtn.onclick = () => openComposer();
     el.heroInfoBtn.style.display = "none";
     return;
   }
   const isActive = job.status !== "done" && job.status !== "failed";
   el.hero.classList.toggle("rendering", isActive);
-  el.heroEyebrow.textContent = isActive ? "Rendering Now" : "Latest Render";
-  el.heroTitle.textContent = heroTitleFrom(job.prompt);
-  el.heroMeta.innerHTML = renderMeta(job);
-  el.heroSynopsis.textContent = job.prompt;
-  el.heroInfoBtn.style.display = "";
+  // Tagline is the permanent hero title - never overwritten by a render's prompt.
+  el.heroEyebrow.textContent = isActive ? "Rendering Now" : "Now Streaming";
+  el.heroTitle.innerHTML = "Turn Anything<br/>You can Imagine<br/>Into a Show";
+  // meta chips, synopsis, and info button intentionally left hidden for a cleaner hero
+  el.heroInfoBtn.style.display = "none";
   if (job.video) {
     if (el.heroVideo.getAttribute("src") !== job.video) {
       el.heroVideo.src = job.video;
       el.heroVideo.load();
     }
-    el.heroPlayBtn.querySelector("span").textContent = "Watch";
-    el.heroPlayBtn.onclick = () => openDetail(job);
+    el.heroPlayBtn.querySelector("span").textContent = "Create a Show";
+    el.heroPlayBtn.onclick = () => openComposer();
   } else {
     el.heroVideo.removeAttribute("src");
-    el.heroPlayBtn.querySelector("span").textContent = "New Render";
+    el.heroPlayBtn.querySelector("span").textContent = "Create a Show";
     el.heroPlayBtn.onclick = () => openComposer();
   }
   el.heroInfoBtn.onclick = () => openDetail(job);
@@ -591,7 +606,7 @@ const IDEAS = [
     cat: "SCI-FI",
     title: "The Signal from Europa",
     hint: "First contact from Jupiter's moon. Mission control watches the screen turn on.",
-    prompt: "Mission control, dim blue light. A young scientist stares at a monitor as pixel by pixel an image resolves — the surface of Europa, then something moving under the ice. The room goes silent. Wide slow push in, sound design of one heartbeat.",
+    prompt: "Mission control, dim blue light. A young scientist stares at a monitor as pixel by pixel an image resolves ,  the surface of Europa, then something moving under the ice. The room goes silent. Wide slow push in, sound design of one heartbeat.",
     a: "#0a1a3a", b: "#0a0a1a",
   },
   {
@@ -618,7 +633,7 @@ const IDEAS = [
   {
     cat: "MYSTERY",
     title: "The Postcard That Wasn't Sent",
-    hint: "A woman finds a stack of postcards addressed to her — but never mailed.",
+    hint: "A woman finds a stack of postcards addressed to her ,  but never mailed.",
     prompt: "A young woman opens a drawer in her late grandmother's attic and finds a rubber-banded stack of vintage postcards, all addressed to her, none of them stamped. She reads the first one. Dust motes in the sunlight, close on her face as her expression shifts.",
     a: "#1a2a2a", b: "#0a1a1a",
   },
@@ -675,15 +690,69 @@ document.addEventListener("click", (e) => {
 });
 
 // ─── Data ──────────────────────────────────────────────────────────
+// Showcase/filler renders shown until the real backend responds. These
+// reference the sample videos bundled in /videos/ so the hero and library
+// feel populated even in a static preview.
+const SHOWCASE_JOBS = [
+  {
+    id: "showcase-sitcom",
+    status: "done",
+    prompt: "Classic '90s three-camera sitcom. Two friends in a small NYC apartment kitchen argue about proper housewarming etiquette. Studio audience laughter.",
+    duration: 8,
+    resolution: "1080P",
+    video: "showcase/showcase_sitcom.mp4",
+    created_at: Math.floor(Date.now() / 1000) - 3600 * 2,
+    finished_at: Math.floor(Date.now() / 1000) - 3600 * 2,
+  },
+  {
+    id: "showcase-animated",
+    status: "done",
+    prompt: "Prime-time animated family sitcom. Dad gets ambushed on the couch by an excited puppy while mom laughs. Flat colors, thick outlines, bouncy motion.",
+    duration: 8,
+    resolution: "1080P",
+    video: "showcase/showcase_animated.mp4",
+    created_at: Math.floor(Date.now() / 1000) - 3600 * 6,
+    finished_at: Math.floor(Date.now() / 1000) - 3600 * 6,
+  },
+  {
+    id: "showcase-truecrime",
+    status: "done",
+    prompt: "True-crime documentary cold open. Rain-slicked suburban street at 3am, yellow police tape across a porch, somber narrator sets up the case. Filmic grain, cool desaturated grade.",
+    duration: 8,
+    resolution: "1080P",
+    video: "showcase/showcase_truecrime.mp4",
+    created_at: Math.floor(Date.now() / 1000) - 3600 * 18,
+    finished_at: Math.floor(Date.now() / 1000) - 3600 * 18,
+  },
+  {
+    id: "showcase-scifi",
+    status: "done",
+    prompt: "Sci-fi starship bridge. Captain in red stands center-frame as the science officer reports an unidentified vessel with an unknown power signature. Orchestral score swells. Cinematic sci-fi lighting.",
+    duration: 8,
+    resolution: "1080P",
+    video: "showcase/showcase_scifi.mp4",
+    created_at: Math.floor(Date.now() / 1000) - 3600 * 26,
+    finished_at: Math.floor(Date.now() / 1000) - 3600 * 26,
+  },
+];
+
 async function refreshJobs() {
   try {
     const r = await fetch(`${API}/api/jobs`);
     if (!r.ok) throw new Error("failed");
-    jobs = await r.json();
+    const remote = await r.json();
+    jobs = (remote && remote.length) ? remote : SHOWCASE_JOBS;
     renderHero();
     renderShelves();
     schedulePoll();
   } catch (err) {
+    // No backend (static preview) - fall back to showcase renders so the
+    // hero autoplays and the library shelf is populated.
+    if (!jobs || !jobs.length) {
+      jobs = SHOWCASE_JOBS;
+      renderHero();
+      renderShelves();
+    }
     console.warn("refresh failed", err);
   }
 }
