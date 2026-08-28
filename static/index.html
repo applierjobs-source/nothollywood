@@ -3,14 +3,11 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Not Hollywood — Netflix for Creators</title>
-    <meta name="description" content="Render your own scenes. Ten seconds to ten minutes." />
+    <title>Not Hollywood, the AI film studio</title>
+    <meta name="description" content="Create a Show. Six seconds to FULL Length. Rendered by machines." />
+    <meta name="theme-color" content="#050607" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap"
-      rel="stylesheet"
-    />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -21,24 +18,24 @@
       <div class="nav-inner">
         <a href="#" class="wordmark">Not<span class="wordmark-accent">Hollywood</span></a>
         <ul class="nav-tabs">
-          <li><a href="#home" data-tab="home" class="active">Home</a></li>
-          <li><a href="#renders" data-tab="renders">My Renders</a></li>
+          <li><a href="#home" data-tab="home" class="active">Studio</a></li>
+          <li><a href="#renders" data-tab="renders">Library</a></li>
           <li><a href="#ideas" data-tab="ideas">Ideas</a></li>
-          <li><a href="#templates" data-tab="templates">Templates</a></li>
+          <li><a href="#templates" data-tab="templates">Runtimes</a></li>
         </ul>
         <div class="nav-right">
           <button class="nav-search" id="searchBtn" aria-label="Search">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
           </button>
           <button class="btn-primary" id="openComposerBtn">
-            <span class="btn-plus">+</span> New Render
+            <span class="btn-plus">+</span> Create a Show
           </button>
         </div>
       </div>
     </nav>
 
     <!-- ═══════════════════════════════════════════════════════════════════
-         HERO — featured / latest render (autoplaying) OR active render banner
+         HERO, featured / latest render (autoplaying) OR active render banner
          ══════════════════════════════════════════════════════════════════ -->
     <section class="hero" id="hero">
       <div class="hero-media">
@@ -55,20 +52,32 @@
         <div class="hero-fade-left"></div>
       </div>
       <div class="hero-content">
-        <p class="hero-eyebrow" id="heroEyebrow">Latest Render</p>
-        <h1 class="hero-title" id="heroTitle">Loading your studio…</h1>
-        <div class="hero-meta" id="heroMeta"></div>
-        <p class="hero-synopsis" id="heroSynopsis"></p>
+        <p class="hero-eyebrow" id="heroEyebrow">Now Streaming</p>
+        <h1 class="hero-title" id="heroTitle">Turn Anything<br/>You can Imagine<br/>Into a Show</h1>
+        <div class="hero-meta" id="heroMeta" hidden></div>
+        <p class="hero-synopsis" id="heroSynopsis" hidden></p>
         <div class="hero-actions">
           <button class="btn-hero-primary" id="heroPlayBtn">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-            <span>Watch</span>
+            <span>Create a Show</span>
           </button>
-          <button class="btn-hero-secondary" id="heroInfoBtn">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
-            <span>More Info</span>
-          </button>
+          <button class="btn-hero-secondary" id="heroInfoBtn" hidden></button>
         </div>
+      </div>
+    </section>
+
+    <!-- Make your own show CTA band -->
+    <section class="cta-band">
+      <div class="cta-band-inner">
+        <div>
+          <p class="cta-eyebrow">Your turn</p>
+          <h2 class="cta-title">Make your own show.</h2>
+          <p class="cta-sub">One prompt. One button. Six seconds to FULL Length.</p>
+        </div>
+        <button class="btn-cta" id="ctaBandBtn">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 4v16m8-8H4" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
+          <span>Create a Show</span>
+        </button>
       </div>
     </section>
 
@@ -79,7 +88,7 @@
       <!-- Now Rendering (hidden when no active jobs) -->
       <section class="shelf" id="shelfActive" hidden>
         <div class="shelf-head">
-          <h2>Now Rendering</h2>
+          <h2>On the machines</h2>
           <span class="shelf-badge" id="activeCount">0</span>
         </div>
         <div class="shelf-scroll" id="activeRow"></div>
@@ -88,44 +97,35 @@
       <!-- Your Renders -->
       <section class="shelf" id="shelfRenders">
         <div class="shelf-head">
-          <h2>Your Renders</h2>
-          <a class="shelf-see-all" href="#renders">See all →</a>
+          <h2>Featured</h2>
         </div>
         <div class="shelf-scroll" id="rendersRow">
           <!-- empty state -->
           <div class="empty-shelf" id="rendersEmpty" hidden>
-            <p>No renders yet. Your first scene lives on the other side of that <b>+ New Render</b> button.</p>
+            <p>No shows yet. Your first scene lives on the other side of that <b>Create a Show</b> button.</p>
           </div>
         </div>
       </section>
 
       <!-- Ideas to Try (curated prompts) -->
-      <section class="shelf" id="shelfIdeas">
+      <section class="shelf" id="shelfIdeas" hidden>
         <div class="shelf-head">
-          <h2>Ideas to Try</h2>
-          <span class="shelf-sub">Tap a card to prefill the composer</span>
+          <h2>Directors' picks</h2>
         </div>
         <div class="shelf-scroll" id="ideasRow"></div>
       </section>
 
       <!-- Templates (duration presets styled as collections) -->
-      <section class="shelf" id="shelfTemplates">
+      <section class="shelf" id="shelfTemplates" hidden>
         <div class="shelf-head">
-          <h2>Templates</h2>
-          <span class="shelf-sub">Common runtimes, pre-configured</span>
+          <h2>Runtimes</h2>
         </div>
         <div class="shelf-scroll" id="templatesRow"></div>
       </section>
 
       <footer class="page-footer">
         <div class="page-footer-inner">
-          <p>
-            <b>Not Hollywood</b> — the AI video studio.
-            Renders via MiniMax H3.
-            Password-gated.
-            Videos ephemeral until you download.
-          </p>
-          <p class="footer-fine">© 2026 Not Hollywood. No affiliation with any streaming service. Renders you make belong to you.</p>
+          <p class="footer-fine">© 2026 Not Hollywood · Your renders belong to you</p>
         </div>
       </footer>
     </main>
@@ -140,9 +140,9 @@
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M6 18L18 6"/></svg>
         </button>
         <div class="composer-head">
-          <p class="composer-eyebrow">New Render</p>
+          <p class="composer-eyebrow">Create a Show</p>
           <h2 id="composerTitle" class="composer-title">Direct a scene.</h2>
-          <p class="composer-sub">Write what you want to see. Add a reference image for style or a subject to anchor on. Pick a length. Render.</p>
+          <p class="composer-sub">Write what you want to see. Anchor it with a reference frame. Pick a runtime. The machines do the rest.</p>
         </div>
 
         <form id="renderForm" class="composer-form">
@@ -205,7 +205,7 @@
               <button type="button" class="chip" data-preset="300">5 min</button>
               <button type="button" class="chip" data-preset="600">10 min</button>
             </div>
-            <p class="length-hint" id="lengthHint">Single H3 shot — fastest and cheapest.</p>
+            <p class="length-hint" id="lengthHint">Single H3 shot, fastest and cheapest.</p>
           </div>
 
           <div class="field field-inline">
@@ -223,17 +223,16 @@
             </div>
             <div class="summary-row">
               <span>Estimated wait</span>
-              <b id="estWait">2–3 min</b>
+              <b id="estWait">2, 3 min</b>
             </div>
           </div>
 
           <button type="submit" class="btn-render" id="submitBtn">
-            <span class="btn-label">Render this scene</span>
+            <span class="btn-label">Send to the machines</span>
             <span class="btn-arrow">→</span>
           </button>
           <p class="submit-note">
-            Password required. You'll be prompted the first time.
-            By clicking Render you agree not to generate content that impersonates a real person without consent.
+            Password required on first submit · By creating a show you agree not to generate content impersonating a real person without consent
           </p>
         </form>
       </div>
@@ -252,7 +251,7 @@
           <video id="detailVideo" class="detail-video" controls playsinline></video>
         </div>
         <div class="detail-body">
-          <p class="detail-eyebrow" id="detailEyebrow">Render</p>
+          <p class="detail-eyebrow" id="detailEyebrow">Show</p>
           <h2 class="detail-title" id="detailTitle"></h2>
           <div class="detail-meta" id="detailMeta"></div>
           <p class="detail-prompt" id="detailPrompt"></p>
