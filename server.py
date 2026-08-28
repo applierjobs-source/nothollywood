@@ -18,8 +18,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-BASE = "https://api.minimax.io/v2"
+# Provider: reAPI (unmoderated MiniMax H3 host).
+# Migrated from MiniMax direct on 2026-08-28. reAPI proxies to the same underlying H3
+# model with the option to disable Google-style content filtering via content_filter:false.
+# See https://reapi.ai/models/minimax-h3 for the full schema.
+BASE = "https://reapi.ai/api/v1"
 GROK_BASE = "https://api.x.ai/v1"
+
+# Public origin for scene-chaining reference-image URLs. reAPI's first_frame_url
+# rejects data URLs and requires a public https URL, so we serve extracted frames
+# and uploaded references from our own /static mount and pass those URLs to reAPI.
+# Falls back to a relative path in dev; reAPI will reject those, which is fine
+# because single-scene text-to-video does not use reference images.
+PUBLIC_ORIGIN = os.environ.get("PUBLIC_ORIGIN", "").rstrip("/")
 
 
 def _load_env_file() -> None:
@@ -35,11 +46,12 @@ def _load_env_file() -> None:
 
 
 _load_env_file()
-# MINIMAX_API_KEY: direct env var (dev sandbox) or
-# CUSTOM_CRED_API_MINIMAX_IO_TOKEN: injected by publish_website credential proxy (prod sandbox)
+# reAPI key.
+# REAPI_API_KEY: primary Railway/dev env var
+# CUSTOM_CRED_REAPI_AI_TOKEN: publish_website credential proxy fallback (main-agent sandbox)
 API_KEY = (
-    os.environ.get("MINIMAX_API_KEY", "")
-    or os.environ.get("CUSTOM_CRED_API_MINIMAX_IO_TOKEN", "")
+    os.environ.get("REAPI_API_KEY", "")
+    or os.environ.get("CUSTOM_CRED_REAPI_AI_TOKEN", "")
 )
 # Grok Imagine fallback: kicks in when MiniMax flags a prompt as sensitive.
 # XAI_API_KEY: direct env var or
@@ -57,11 +69,15 @@ THUMBS = STATIC / "thumbs"
 JOBS_FILE = ROOT / "jobs.json"
 
 SCENES = ROOT / "scenes"  # per-scene mp4s before concat
+FRAMES = STATIC / "frames"  # reference frames (uploads + extracted last frames)
+                            # served publicly at /static/frames/<name> so reAPI
+                            # can fetch them for first_frame_url
 
 STATIC.mkdir(exist_ok=True)
 VIDEOS.mkdir(exist_ok=True)
 THUMBS.mkdir(exist_ok=True)
 SCENES.mkdir(exist_ok=True)
+FRAMES.mkdir(exist_ok=True)
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -88,8 +104,12 @@ def grok_headers() -> dict:
     return {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
 
 
-# Substrings that indicate MiniMax rejected the prompt for policy reasons
-# (rather than a transient failure). Any of these triggers Grok fallback.
+# Substrings that indicated MiniMax direct rejected the prompt for policy reasons.
+# Kept for the Grok fallback path but effectively dead now that reAPI runs H3
+# with content_filter:false — reAPI won't return these strings for policy issues.
+# The Grok fallback code below is left in place as a break-glass option, but the
+# earlier research confirmed Grok's public API also doesn't support NSFW output,
+# so this path will not help with real content-policy failures.
 _SENSITIVE_MARKERS = (
     "sensitive",           # 'input new_sensitive, input text sensitive'
     "content policy",
@@ -180,40 +200,84 @@ def encode_image_bytes(raw: bytes, mime: str = "image/png") -> str:
     return f"data:{mime};base64,{b64}"
 
 
-def submit_h3(prompt: str, duration: int, resolution: str, ref_data_url: str | None) -> tuple[str | None, str | None]:
-    content: list[dict] = [{"type": "text", "text": prompt}]
-    if ref_data_url:
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": ref_data_url},
-            "role": "reference_image",
-        })
+# ─── reAPI resolution mapping ─────────────────────────────────────────────
+# Internal API surface uses "768P" / "1080P" (kept for backward compat with the
+# frontend). reAPI supports "768P" or "2K" only. 1080P callers get bumped to 2K.
+_REAPI_RESOLUTIONS = {"768P": "768P", "1080P": "2K", "2K": "2K"}
+
+
+def _reapi_resolution(res: str) -> str:
+    return _REAPI_RESOLUTIONS.get(res, "768P")
+
+
+def submit_h3(prompt: str, duration: int, resolution: str, ref_url: str | None) -> tuple[str | None, str | None]:
+    """Submit a scene to reAPI's minimax-h3 endpoint.
+
+    ref_url must be a public https URL — reAPI rejects data URLs. When ref_url is
+    provided, aspect_ratio is omitted (orientation derives from the source image).
+    content_filter is disabled unconditionally; that is the entire reason we picked
+    reAPI over MiniMax direct.
+    """
     body: dict = {
-        "model": "MiniMax-H3",
-        "content": content,
+        "model": "minimax-h3",
+        "prompt": prompt,
         "duration": duration,
-        "resolution": resolution,
+        "resolution": _reapi_resolution(resolution),
+        "content_filter": False,
     }
-    if not ref_data_url:
-        body["ratio"] = "16:9"
+    if ref_url:
+        body["first_frame_url"] = ref_url
+    else:
+        body["aspect_ratio"] = "16:9"
     try:
-        r = requests.post(f"{BASE}/video_generation", headers=headers(), json=body, timeout=60)
+        r = requests.post(f"{BASE}/videos/generations", headers=headers(), json=body, timeout=60)
     except Exception as e:  # noqa: BLE001
         return None, f"network error: {e}"
-    if r.status_code != 200:
-        return None, f"h3 http {r.status_code}: {r.text[:400]}"
+    if r.status_code >= 300:
+        # reAPI error shape: {"error": {"code": int, "message": str, "request_id": str}}
+        try:
+            err_obj = r.json().get("error") or {}
+            msg = err_obj.get("message") or r.text[:400]
+        except Exception:  # noqa: BLE001
+            msg = r.text[:400]
+        return None, f"reapi http {r.status_code}: {msg}"
     data = r.json()
-    tid = data.get("task_id")
+    tid = data.get("id")
     if not tid:
-        return None, f"h3 no task_id in response: {data}"
+        return None, f"reapi no id in response: {data}"
     return tid, None
 
 
 def fetch_task(task_id: str) -> dict:
-    r = requests.get(f"{BASE}/query/video_generation/{task_id}", headers=headers(), timeout=30)
+    """Poll reAPI task status. Returns a dict shaped like the old MiniMax response so
+    render_one_scene doesn't need to change: {status, content: {url}, error: {message}}.
+
+    reAPI's raw shape is {id, status: processing|completed|failed, output: {video_urls},
+    error: {code, message}, usage: {credits}}. Statuses are remapped to succeeded/failed/running
+    to match the legacy contract downstream.
+    """
+    try:
+        r = requests.get(f"{BASE}/tasks/{task_id}", headers=headers(), timeout=30)
+    except Exception:  # noqa: BLE001
+        return {}
     if r.status_code != 200:
         return {}
-    return r.json().get("task", {})
+    raw = r.json()
+    status = raw.get("status", "processing")
+    mapped_status = {
+        "completed": "succeeded",
+        "processing": "running",
+        "queued": "queued",
+        "failed": "failed",
+    }.get(status, status)
+    out: dict = {"status": mapped_status}
+    urls = (raw.get("output") or {}).get("video_urls") or []
+    if urls:
+        out["content"] = {"url": urls[0]}
+    err = raw.get("error")
+    if err:
+        out["error"] = {"message": err.get("message", "generation failed")}
+    return out
 
 
 def plan_scenes(total_seconds: int) -> list[int]:
@@ -388,7 +452,9 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
     scene_dir.mkdir(exist_ok=True)
 
     scene_paths: list[Path] = []
-    ref_data_url = initial_ref_data_url
+    # ref_url is always a public https URL (reAPI requires it). The initial ref
+    # comes from the /api/generate handler which saved the upload to FRAMES/.
+    ref_url = initial_ref_data_url  # arg is now a URL, not a data URL; name kept for callers
 
     def _update_scene_status(idx: int, status: str):
         j = JOBS.get(job_id)
@@ -410,7 +476,7 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
             )
         scene_out = scene_dir / f"scene_{i:02d}.mp4"
         ok, err = render_one_scene(
-            scene_prompt, dur, resolution, ref_data_url, scene_out,
+            scene_prompt, dur, resolution, ref_url, scene_out,
             on_status=lambda s, i=i: _update_scene_status(i, s),
         )
         if not ok:
@@ -420,12 +486,18 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
             return
         scene_paths.append(scene_out)
 
-        # Extract last frame to chain into next scene for continuity
+        # Extract last frame to chain into next scene for continuity. reAPI needs
+        # a public URL, so we save the frame under /static/frames/ where the
+        # FastAPI StaticFiles mount serves it publicly.
         if i + 1 < len(scenes):
-            frame_path = scene_dir / f"frame_{i:02d}.png"
-            if extract_last_frame(scene_out, frame_path):
-                raw = frame_path.read_bytes()
-                ref_data_url = encode_image_bytes(raw, "image/png")
+            frame_name = f"{job_id}_frame_{i:02d}.png"
+            frame_path = FRAMES / frame_name
+            if extract_last_frame(scene_out, frame_path) and PUBLIC_ORIGIN:
+                ref_url = f"{PUBLIC_ORIGIN}/static/frames/{frame_name}"
+            else:
+                # No PUBLIC_ORIGIN configured (dev) or frame extraction failed:
+                # drop chaining and let the next scene render text-only.
+                ref_url = None
 
     # All scenes rendered — stitch
     j = JOBS.get(job_id)
@@ -477,16 +549,24 @@ async def generate(
         raise HTTPException(400, "duration must be between 4 and 600 seconds")
     if resolution not in ("768P", "1080P"):
         raise HTTPException(400, "resolution must be 768P or 1080P")
-    ref_data_url = None
+    scenes_plan = plan_scenes(duration)
+    job_id = uuid.uuid4().hex[:12]
+
+    # Save uploaded reference under /static/frames/ so reAPI can fetch it.
+    ref_url: str | None = None
     if reference is not None:
         raw = await reference.read()
         if len(raw) > 8 * 1024 * 1024:
             raise HTTPException(400, "reference image too large (max 8MB)")
-        mime = reference.content_type or "image/png"
-        ref_data_url = encode_image_bytes(raw, mime)
-
-    scenes_plan = plan_scenes(duration)
-    job_id = uuid.uuid4().hex[:12]
+        # Normalize extension by content-type; default to .png
+        mime = (reference.content_type or "image/png").lower()
+        ext = "jpg" if "jpeg" in mime or "jpg" in mime else "png"
+        ref_name = f"{job_id}_upload.{ext}"
+        (FRAMES / ref_name).write_bytes(raw)
+        if PUBLIC_ORIGIN:
+            ref_url = f"{PUBLIC_ORIGIN}/static/frames/{ref_name}"
+        # If PUBLIC_ORIGIN is unset (dev with no public URL), we silently drop
+        # the reference. Better than sending a data URL that reAPI will reject.
     JOBS[job_id] = {
         "id": job_id,
         "prompt": prompt.strip(),
@@ -500,7 +580,7 @@ async def generate(
         "created_at": time.time(),
     }
     save_jobs(JOBS)
-    Thread(target=multi_scene_worker, args=(job_id, ref_data_url), daemon=True).start()
+    Thread(target=multi_scene_worker, args=(job_id, ref_url), daemon=True).start()
     return JOBS[job_id]
 
 
