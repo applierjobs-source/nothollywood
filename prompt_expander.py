@@ -13,14 +13,21 @@ The fix (this module):
          Michael Scott, Rick Sanchez, etc.)
       2. Writes a shared "character bible" describing each in canonical detail
       3. Produces N per-scene prompts (one per scene duration) that each embed
-         the character bible + style guide so every parallel scene renders
-         a consistent-looking character.
+         the character bible + style guide so every scene renders a
+         consistent-looking character.
 
-Fallback: if ANTHROPIC_API_KEY is missing or the call fails, we fall back to
-the old behavior (raw prompt, no expansion) so renders still work.
+Providers (chosen at startup by which env vars are set, first hit wins):
+  1. Grok (xAI) via Anthropic-compat endpoint  — XAI_API_KEY
+  2. Anthropic direct                          — ANTHROPIC_API_KEY
+Both speak the same Anthropic Messages wire format so we only maintain one
+call path. If neither is set (or the call fails), we fall back to the
+catalog-based expander so renders still work.
 
-Cost: Claude Haiku 4.5, ~1-2K tokens per plan = ~$0.001-0.003 per render.
-Latency: ~2-4s single call at plan time, then all N scenes render in parallel.
+Cost:
+  Grok grok-4-fast: ~$0.20 / 1M input, ~$0.50 / 1M output.
+  Claude Haiku 4.5: comparable range.
+  ~1-2K tokens per plan = ~$0.001-0.003 per render either way.
+Latency: ~2-4s single call at plan time.
 """
 
 from __future__ import annotations
@@ -33,9 +40,51 @@ from typing import Any
 
 import requests
 
+# ------------------------------------------------------------------
+# Provider selection
+# ------------------------------------------------------------------
+# Grok (xAI) exposes an Anthropic-compatible /v1/messages endpoint at
+# api.x.ai, so the same request body works for either provider — we just
+# pick the URL + auth header at call time.
+#
+# Order of preference: Grok, then Anthropic. The user's setup uses Grok.
+XAI_API_KEY = os.environ.get("XAI_API_KEY", "").strip()
+XAI_MODEL = os.environ.get("XAI_MODEL", "grok-4-fast-non-reasoning")
+XAI_URL = "https://api.x.ai/v1/messages"
+
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+
+
+def _select_provider() -> tuple[str, str, str, dict[str, str]] | None:
+    """Return (provider_name, url, model, headers) for the first configured LLM,
+    or None when no key is set. Evaluated on every call so restarts pick up
+    env changes without a code deploy.
+    """
+    if XAI_API_KEY:
+        return (
+            "grok",
+            XAI_URL,
+            XAI_MODEL,
+            {
+                "x-api-key": XAI_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+        )
+    if ANTHROPIC_KEY:
+        return (
+            "anthropic",
+            ANTHROPIC_URL,
+            ANTHROPIC_MODEL,
+            {
+                "x-api-key": ANTHROPIC_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+        )
+    return None
 
 # Timeout for the whole expansion call. The video render takes minutes, so
 # spending up to 15s here is fine, but we don't want to hang the worker if
@@ -173,8 +222,10 @@ def expand_prompt(prompt: str, scene_durations: list[int]) -> dict[str, Any]:
     n = len(scene_durations)
     t0 = time.time()
 
-    if not ANTHROPIC_KEY:
-        return _fallback(prompt, scene_durations, t0, "no ANTHROPIC_API_KEY set")
+    selected = _select_provider()
+    if selected is None:
+        return _fallback(prompt, scene_durations, t0, "no LLM key set (XAI_API_KEY or ANTHROPIC_API_KEY)")
+    provider_name, url, model, headers = selected
 
     hint = _known_character_hint(prompt)
     user_msg = (
@@ -191,14 +242,10 @@ def expand_prompt(prompt: str, scene_durations: list[int]) -> dict[str, Any]:
 
     try:
         r = requests.post(
-            ANTHROPIC_URL,
-            headers={
-                "x-api-key": ANTHROPIC_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
+            url,
+            headers=headers,
             json={
-                "model": ANTHROPIC_MODEL,
+                "model": model,
                 "max_tokens": 4096,
                 "system": SYSTEM_PROMPT,
                 "messages": [{"role": "user", "content": user_msg}],
@@ -206,20 +253,28 @@ def expand_prompt(prompt: str, scene_durations: list[int]) -> dict[str, Any]:
             timeout=EXPANSION_TIMEOUT,
         )
     except requests.RequestException as e:
-        return _fallback(prompt, scene_durations, t0, f"http error: {e}")
+        return _fallback(prompt, scene_durations, t0, f"http error ({provider_name}): {e}")
 
     if r.status_code != 200:
         return _fallback(
             prompt, scene_durations, t0,
-            f"anthropic {r.status_code}: {r.text[:200]}"
+            f"{provider_name} {r.status_code}: {r.text[:200]}"
         )
 
     try:
         data = r.json()
-        text_blocks = [b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"]
+        # Both providers use Anthropic's content-block schema. We only want
+        # the actual text output — Grok additionally emits "thinking" blocks
+        # (its reasoning trace) that we must ignore. Any block whose type
+        # isn't exactly "text" is dropped.
+        text_blocks = [
+            b.get("text", "")
+            for b in data.get("content", [])
+            if b.get("type") == "text"
+        ]
         raw = "".join(text_blocks).strip()
     except Exception as e:
-        return _fallback(prompt, scene_durations, t0, f"parse error: {e}")
+        return _fallback(prompt, scene_durations, t0, f"parse error ({provider_name}): {e}")
 
     # Model sometimes wraps JSON in ```json fences even when told not to.
     m = re.search(r"\{.*\}", raw, re.DOTALL)
@@ -254,7 +309,7 @@ def expand_prompt(prompt: str, scene_durations: list[int]) -> dict[str, Any]:
         "characters": str(parsed.get("characters", "")).strip(),
         "scenes": scenes_norm,
         "notes": str(parsed.get("notes", "")).strip(),
-        "provider": "anthropic",
+        "provider": provider_name,
         "latency_ms": int((time.time() - t0) * 1000),
         "error": None,
     }
