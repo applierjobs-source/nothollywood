@@ -1,0 +1,4 @@
+# Railway build config. We need ffmpeg for scene concatenation and watermarking;
+# Nixpacks doesn't include it in the default Python image, so we add it here.
+[phases.setup]
+aptPkgs = ["ffmpeg"]

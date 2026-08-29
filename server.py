@@ -595,9 +595,19 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
     else:
         ok, err = concat_scenes(scene_paths, unwatermarked)
 
+    # Watermark is best-effort — if ffmpeg is missing or the overlay filter
+    # fails, we ship the unwatermarked scene rather than losing the whole render.
+    # This protects against Railway rebuilds where the apt package didn't
+    # install cleanly and against edge-case ffmpeg filter errors.
     if ok:
-        # Apply Not Hollywood watermark as final step.
-        ok, err = apply_watermark(unwatermarked, dest)
+        wm_ok, wm_err = apply_watermark(unwatermarked, dest)
+        if not wm_ok:
+            print(f"[render {job_id}] watermark failed ({wm_err[:200]}) \u2014 shipping unwatermarked")
+            try:
+                import shutil
+                shutil.copy(unwatermarked, dest)
+            except Exception as e:
+                ok, err = False, f"copy-unwatermarked failed: {e}"
 
     j = JOBS.get(job_id)
     if not j:
