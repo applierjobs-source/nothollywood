@@ -69,6 +69,12 @@ SITE_PASSWORD = os.environ.get("SITE_PASSWORD", "")
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 
+# Testing kill-switch: when AUTH_DISABLED=1 the frontend hides sign-in/signup
+# and /api/generate accepts anonymous requests. Set to "" (unset) to re-enable
+# auth without touching any other env var. Supabase env vars can remain set;
+# they're simply ignored on the auth path while this is on.
+AUTH_DISABLED = os.environ.get("AUTH_DISABLED", "").strip() in {"1", "true", "yes", "on"}
+
 # ────────────────────────────────────────────────────────────────────
 # Stripe checkout config. STRIPE_SECRET_KEY is the only required var;
 # the four STRIPE_PRICE_* env vars point at the recurring Stripe Price
@@ -964,9 +970,10 @@ def public_config():
     swap Supabase projects via env var without rebuilding.
     """
     return {
-        "supabase_url": SUPABASE_URL,
-        "supabase_anon_key": SUPABASE_ANON_KEY,
-        "auth_required": bool(SUPABASE_URL and SUPABASE_ANON_KEY),
+        "supabase_url": "" if AUTH_DISABLED else SUPABASE_URL,
+        "supabase_anon_key": "" if AUTH_DISABLED else SUPABASE_ANON_KEY,
+        "auth_required": (not AUTH_DISABLED) and bool(SUPABASE_URL and SUPABASE_ANON_KEY),
+        "auth_disabled": AUTH_DISABLED,
     }
 
 
@@ -982,7 +989,11 @@ async def generate(
     # shared password if SITE_PASSWORD is set (break-glass only).
     user_id: str | None = None
     user_email: str | None = None
-    if SUPABASE_URL:
+    if AUTH_DISABLED:
+        # Testing mode: anonymous is allowed. No user_id is recorded, so these
+        # renders won't appear in any user's library.
+        pass
+    elif SUPABASE_URL:
         claims = require_user(request)
         user_id = claims.get("sub")
         user_email = claims.get("email")
@@ -1060,6 +1071,9 @@ def list_jobs(request: Request):
     - When Supabase auth is not configured, returns all jobs (legacy behavior).
     """
     items = sorted(JOBS.values(), key=lambda j: j.get("created_at", 0), reverse=True)
+    if AUTH_DISABLED:
+        # Testing mode: everyone sees every render (no user_id scoping).
+        return [{k: v for k, v in j.items() if k != "task_id"} for j in items[:50]]
     if SUPABASE_URL:
         claims = get_user(request)
         caller = claims.get("sub") if claims else None

@@ -109,8 +109,20 @@ async function initAuth() {
     if (!r.ok) throw new Error("config failed");
     const cfg = await r.json();
     authRequired = !!cfg.auth_required;
+    if (cfg.auth_disabled) {
+      // Testing mode: server-side AUTH_DISABLED=1. Show a small banner so it's
+      // obvious auth is off, and skip Supabase client setup entirely.
+      const bar = document.createElement("div");
+      bar.textContent = "Testing mode — sign-in and account creation are disabled";
+      bar.style.cssText =
+        "position:fixed;top:0;left:0;right:0;z-index:9999;padding:6px 12px;" +
+        "background:#7a3a00;color:#fff;font:600 12px/1.4 system-ui,sans-serif;" +
+        "text-align:center;letter-spacing:.02em;";
+      document.body.prepend(bar);
+      document.body.style.paddingTop = "28px";
+    }
     if (!authRequired) {
-      // Legacy mode: no Supabase configured server-side. Keep composer open to all.
+      // No Supabase auth (either not configured or testing mode). Keep composer open to all.
       return;
     }
     // eslint-disable-next-line no-undef
