@@ -15,7 +15,7 @@ from threading import Thread
 import requests
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from auth import require_user, get_user
@@ -1207,6 +1207,47 @@ def get_job(job_id: str, request: Request):
         if caller != job["user_id"]:
             raise HTTPException(404, "job not found")
     return job
+
+
+@app.get("/api/_debug/jobs")
+def debug_all_jobs(request: Request):
+    """Admin-only view of ALL active jobs (bypasses user scoping).
+
+    Gated by ADMIN_TOKEN env var. Used by the operator (Zach) to check whether
+    a stuck render is actually stuck or just slow, without needing to be signed
+    in as the user who submitted it.
+
+    Header: X-Admin-Token: <ADMIN_TOKEN>
+    """
+    import os as _os, time as _time
+    admin_token = _os.environ.get("ADMIN_TOKEN", "")
+    if not admin_token:
+        return JSONResponse({"error": "admin token not configured"}, status_code=503)
+    supplied = request.headers.get("X-Admin-Token", "")
+    if supplied != admin_token:
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    now = _time.time()
+    items = sorted(JOBS.values(), key=lambda j: j.get("created_at", 0), reverse=True)
+    out = []
+    for j in items[:30]:
+        ca = j.get("created_at", 0)
+        ss = j.get("scene_started_at", 0)
+        out.append({
+            "id": j.get("id"),
+            "status": j.get("status"),
+            "scene_status": j.get("scene_status"),
+            "scene_index": j.get("scene_index"),
+            "scene_total": j.get("scene_total"),
+            "scene_eta_seconds": j.get("scene_eta_seconds"),
+            "task_id": j.get("task_id"),
+            "user_id": j.get("user_id"),
+            "user_email": j.get("user_email"),
+            "age_seconds": int(now - ca) if ca else None,
+            "scene_age_seconds": int(now - ss) if ss else None,
+            "prompt": (j.get("prompt") or "")[:120],
+            "error": j.get("error"),
+        })
+    return {"total": len(items), "jobs": out}
 
 
 @app.get("/api/jobs")
