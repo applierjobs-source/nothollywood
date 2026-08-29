@@ -206,22 +206,30 @@ function updateLengthDisplay() {
   if (d < 60) {
     el.lengthValue.textContent = d;
     el.lengthUnit.textContent = d === 1 ? "second" : "seconds";
-  } else {
+  } else if (d < 3600) {
     const m = d / 60;
     el.lengthValue.textContent = Number.isInteger(m) ? m : m.toFixed(1);
     el.lengthUnit.textContent = m === 1 ? "minute" : "minutes";
+  } else {
+    const h = d / 3600;
+    el.lengthValue.textContent = Number.isInteger(h) ? h : h.toFixed(1);
+    el.lengthUnit.textContent = h === 1 ? "hour" : "hours";
   }
   const n = sceneCount(d);
-  el.lengthHint.textContent = n === 1
-    ? "Single H3 shot ,  fastest and cheapest."
-    : `Rendered as ${n} sequential 10-second scenes and stitched together.`;
+  if (n === 1) {
+    el.lengthHint.textContent = "Single H3 shot — fastest and cheapest.";
+  } else if (d >= 1800) {
+    el.lengthHint.textContent = `Long-form render: ${n} sequential 10-second scenes. Expect a long wait and higher credit cost.`;
+  } else {
+    el.lengthHint.textContent = `Rendered as ${n} sequential 10-second scenes and stitched together.`;
+  }
   // Chip active state
   el.presetChips.querySelectorAll(".chip").forEach((c) => {
     c.classList.toggle("active", Number(c.dataset.preset) === d);
   });
   // Slider track fill (0-100%) for the linear-gradient styling
   const min = Number(el.durationSlider.min || 6);
-  const max = Number(el.durationSlider.max || 600);
+  const max = Number(el.durationSlider.max || 3600);
   const pct = Math.round(((d - min) / (max - min)) * 100);
   el.durationSlider.style.setProperty("--slider-fill", `${pct}%`);
   updateEstimate();
