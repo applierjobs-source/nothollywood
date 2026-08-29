@@ -335,7 +335,20 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+// Store any prompt the user tried to open the composer with (e.g. from a
+// template tile) so we can restore it after they finish signing up.
+let pendingComposerPrompt = null;
+
 function openComposer(prefillPrompt) {
+  // Auth gate: if auth is required and no user is signed in, route them to
+  // the signup modal instead. The composer will auto-open after successful
+  // signin/signup (see auth-form submit handler), so the user never has to
+  // click Create a Show a second time.
+  if (authRequired && !currentUser) {
+    if (prefillPrompt) pendingComposerPrompt = prefillPrompt;
+    openAuthModal("signup");
+    return;
+  }
   if (prefillPrompt) {
     el.prompt.value = prefillPrompt;
     el.prompt.dispatchEvent(new Event("input"));
@@ -1131,8 +1144,12 @@ el.authForm.addEventListener("submit", async (e) => {
     // UX: after successful signup or signin, drop the user straight into
     // the composer so they don't land on the marketing shell wondering what
     // to click. Small delay lets renderAuthUI paint the nav chip first.
+    // If they landed on auth by clicking a specific template/idea tile,
+    // restore that prompt so they don't lose their intent.
     setTimeout(() => {
-      if (typeof openComposer === "function") openComposer();
+      const prefill = pendingComposerPrompt;
+      pendingComposerPrompt = null;
+      if (typeof openComposer === "function") openComposer(prefill);
     }, 150);
   } catch (err) {
     el.authError.hidden = false;
