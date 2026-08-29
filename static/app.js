@@ -594,6 +594,43 @@ function renderHero() {
 }
 
 // ─── Rendering: shelves ────────────────────────────────────────────
+// Per-scene row inside the rendering tile. Shows an honest per-scene status
+// with real elapsed time on running scenes. Data comes from the backend's
+// scenes_state array — no per-scene fabrication on the frontend.
+function sceneRowHTML(s, job) {
+  const status = (s.status || "queued").toLowerCase();
+  const label = (() => {
+    if (status === "queued") return "Queued";
+    if (status === "submitting") return "Submitting…";
+    if (status === "running") {
+      if (s.started_at) {
+        const elapsed = Math.max(0, Math.round((Date.now() / 1000) - s.started_at));
+        return `Rendering · ${elapsed}s`;
+      }
+      return "Rendering…";
+    }
+    if (status === "succeeded") {
+      if (s.started_at && s.finished_at && s.finished_at > s.started_at) {
+        const dur = Math.round(s.finished_at - s.started_at);
+        return `Done · ${dur}s`;
+      }
+      return "Done";
+    }
+    if (status === "failed") return "Failed";
+    return status;
+  })();
+  const dot = `<span class="scene-row-dot scene-row-dot-${status}"></span>`;
+  const durLabel = `${s.duration}s`;
+  return `
+    <div class="scene-row scene-row-${status}" data-scene-idx="${s.index}" data-scene-started="${s.started_at || 0}">
+      ${dot}
+      <span class="scene-row-idx">Scene ${s.index + 1}</span>
+      <span class="scene-row-dur">${durLabel}</span>
+      <span class="scene-row-label">${escapeHtml(label)}</span>
+    </div>
+  `;
+}
+
 function renderTile(job) {
   const isActive = job.status !== "done" && job.status !== "failed";
   const isFailed = job.status === "failed";
@@ -607,55 +644,66 @@ function renderTile(job) {
     //   - Falls back to 8% shimmer before the first scene reports running.
     const total = job.scene_total || 1;
     const idx = Math.max(0, (job.scene_index || 1) - 1); // 0-based
-    let currentSceneFrac = 0;
-    if (job.scene_started_at && job.scene_eta_seconds) {
-      const elapsed = (Date.now() / 1000) - job.scene_started_at;
-      currentSceneFrac = Math.min(0.98, elapsed / job.scene_eta_seconds);
-    } else if ((job.scene_status || "") === "queued" || !job.scene_status) {
-      currentSceneFrac = 0.05;
-    } else {
-      currentSceneFrac = 0.10;
-    }
-    if ((job.scene_status || "") === "succeeded") currentSceneFrac = 1;
-    const rawPct = ((idx + currentSceneFrac) / total) * 100;
-    const pct = Math.max(3, Math.min(95, Math.round(rawPct)));
+    // ==== HONEST PROGRESS ====
+    // Overall bar = scenes done / total. NEVER let per-scene fraction inflate
+    // the top-line bar — that's what made it read "almost done" during scene 1
+    // of 7. Individual scene progress lives in the scene list below.
+    const done = Number(job.scene_done || 0);
+    const failed = Number(job.scene_failed || 0);
+    const running = Number(job.scene_running || 0);
+    // We fill the bar based on completed work. Running scenes push it a small
+    // amount so it's not literally stuck at 0% while 4 scenes render in parallel.
+    const runningBoost = Math.min(running, total) * 0.15; // half a scene, capped
+    const overallFrac = Math.min(0.98, (done + runningBoost) / total);
+    const pct = Math.max(2, Math.round(overallFrac * 100));
+    const isStitching = job.status === "stitching";
+    const finalPct = isStitching ? 96 : pct;
 
-    // Human-readable status label. Backend statuses are terse ("running",
-    // "queued", "succeeded", "stitching") — map them to sentences.
-    const statusLabel = (() => {
-      const s = (job.scene_status || job.status || "").toLowerCase();
-      if (job.status === "stitching") return "Finalizing your video…";
-      if (s === "queued" || s === "") return "Warming up the studio…";
-      if (s === "submitting" || s === "grok_submitting") return "Sending scene to the render farm…";
-      if (s === "running") return "Rendering pixels one frame at a time…";
-      if (s === "succeeded") return "Downloading your scene…";
-      return `Status: ${s}`;
+    // Aggregate ETA: use median per-scene ETA * (remaining scenes / concurrency).
+    // reAPI concurrency is 4; slowest-scene wall-clock model gives an honest bound.
+    const scenesState = Array.isArray(job.scenes_state) ? job.scenes_state : [];
+    const perSceneEta = scenesState.length
+      ? Math.max(30, ...scenesState.map((s) => s.eta_seconds || 60))
+      : 60;
+    const remainingScenes = Math.max(0, total - done);
+    // Concurrency bound = 4 (matches SCENE_CONCURRENCY backend default).
+    // While parallel, wall clock ≈ ceil(remaining / 4) * per-scene ETA.
+    const parallelBatches = Math.max(1, Math.ceil(remainingScenes / 4));
+    const totalEtaSec = isStitching ? 15 : parallelBatches * perSceneEta;
+    // Best signal for time remaining: max(finished_at across done scenes) is
+    // when the last thing finished; but we don't need this precision for the
+    // header — the per-scene rows tell the detailed story. Use a simple
+    // "~N min remaining" header.
+    const etaHeader = (() => {
+      if (isStitching) return "Finalizing your video…";
+      if (done === total && total > 0) return "Stitching scenes together…";
+      const mins = totalEtaSec / 60;
+      if (mins < 1) return `~${Math.max(15, Math.round(totalEtaSec))}s remaining`;
+      if (mins < 2) return `~1 min remaining`;
+      return `~${Math.round(mins)} min remaining`;
     })();
-    // ETA remaining, when we have the data
-    let etaBit = "";
-    if (job.scene_started_at && job.scene_eta_seconds) {
-      const elapsed = (Date.now() / 1000) - job.scene_started_at;
-      const remaining = Math.max(0, job.scene_eta_seconds - elapsed);
-      if (remaining > 3) {
-        etaBit = ` · ~${Math.round(remaining)}s remaining`;
-      } else if (currentSceneFrac >= 0.95) {
-        etaBit = " · almost done";
-      }
-    }
-    const sceneCounter = job.scene_total > 1
-      ? `Scene ${job.scene_index || 1}/${job.scene_total} · `
+
+    // Header counter
+    const headerCounter = total > 1
+      ? `${done} of ${total} scenes complete · ${running} rendering${failed ? ` · ${failed} failed` : ""}`
+      : (job.scene_status === "running" ? "Rendering…" : "Preparing…");
+
+    // Per-scene rows. For single-scene renders we skip the list — no value.
+    const sceneRows = (total > 1 && scenesState.length)
+      ? scenesState.map((s) => sceneRowHTML(s, job)).join("")
       : "";
-    const sceneLine = `${sceneCounter}${statusLabel}${etaBit}`;
+
     return `
       <div class="tile tile-active" data-id="${escapeHtml(job.id)}">
         <span class="tile-badge rendering">${escapeHtml(job.status.toUpperCase())}</span>
         <div class="tile-active-body">
-          <div>
+          <div class="tile-active-header">
             <div class="tile-active-prompt">${escapeHtml(firstLine(job.prompt))}</div>
-            <div class="tile-active-scene">${sceneLine}</div>
+            <div class="tile-active-scene">${escapeHtml(headerCounter)} · <span class="tile-active-eta">${escapeHtml(etaHeader)}</span></div>
           </div>
+          ${sceneRows ? `<div class="tile-active-scenes">${sceneRows}</div>` : ""}
           <div class="tile-active-progress">
-            <div class="tile-active-progress-fill" style="width:${pct}%"></div>
+            <div class="tile-active-progress-fill" style="width:${finalPct}%"></div>
           </div>
         </div>
       </div>
@@ -1009,25 +1057,20 @@ function startProgressTick() {
       return;
     }
     for (const job of active) {
-      if (!job.scene_started_at || !job.scene_eta_seconds) continue;
-      const total = job.scene_total || 1;
-      const idx = Math.max(0, (job.scene_index || 1) - 1);
-      const elapsed = (Date.now() / 1000) - job.scene_started_at;
-      let frac = Math.min(0.98, elapsed / job.scene_eta_seconds);
-      if ((job.scene_status || "") === "succeeded") frac = 1;
-      const rawPct = ((idx + frac) / total) * 100;
-      const pct = Math.max(3, Math.min(95, Math.round(rawPct)));
       const tile = document.querySelector(`.tile-active[data-id="${job.id}"]`);
       if (!tile) continue;
-      const fill = tile.querySelector(".tile-active-progress-fill");
-      if (fill) fill.style.width = pct + "%";
-      const remaining = Math.max(0, job.scene_eta_seconds - elapsed);
-      const sceneLineEl = tile.querySelector(".tile-active-scene");
-      if (sceneLineEl && remaining > 3 && (job.scene_status || "") === "running") {
-        const current = sceneLineEl.textContent;
-        const base = current.replace(/ · ~?\d+s remaining$/, "").replace(/ · almost done$/, "");
-        sceneLineEl.textContent = `${base} · ~${Math.round(remaining)}s remaining`;
-      }
+      // Update the elapsed counter on each running scene row without
+      // re-rendering the tile — that lets the top-line poll happen every 3s
+      // while these tick smoothly at 4Hz.
+      const runningRows = tile.querySelectorAll(".scene-row-running");
+      const nowSec = Date.now() / 1000;
+      runningRows.forEach((row) => {
+        const startedAt = Number(row.dataset.sceneStarted || 0);
+        if (!startedAt) return;
+        const elapsed = Math.max(0, Math.round(nowSec - startedAt));
+        const labelEl = row.querySelector(".scene-row-label");
+        if (labelEl) labelEl.textContent = `Rendering · ${elapsed}s`;
+      });
     }
   }, 250);
 }

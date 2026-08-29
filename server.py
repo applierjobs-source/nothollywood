@@ -669,23 +669,48 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
     # scene_states tracks the status string reported by reAPI for each scene
     # so we can compute an aggregate progress signal for the UI.
     scene_states: dict[int, str] = {i: "queued" for i in range(len(scenes))}
-    scene_started: dict[int, float] = {}
-    scenes_started_lock = None  # single-threaded state writes below
+    scene_started_at: dict[int, float] = {}
+    scene_finished_at: dict[int, float] = {}
+
+    # Seed the scenes_state array once so the UI can render the scene list
+    # from the moment the job is created, not after the first status callback.
+    _now = time.time()
+    _scenes_state_seed = [
+        {
+            "index": i,
+            "duration": dur,
+            "status": "queued",
+            "started_at": 0.0,
+            "finished_at": 0.0,
+            "eta_seconds": max(20, min(180, int(dur * 5 + 10))),
+        }
+        for i, dur in enumerate(scenes)
+    ]
+    _job0 = JOBS.get(job_id)
+    if _job0 is not None:
+        _job0["scenes_state"] = _scenes_state_seed
+        save_jobs(JOBS)
 
     def _publish_agg_status():
         """Write an aggregate progress snapshot back to JOBS[job_id].
 
-        Frontend expects a single scene_index/scene_total pair with an ETA.
-        We compute it as: index = number of scenes done; status = 'running' if
-        any scene is running; ETA = per-scene ETA (constant) so the bar keeps
-        moving even when scenes finish out of order.
+        Publishes two shapes so the frontend has both a summary and detail:
+          - scene_index / scene_total / scene_status / scene_eta_seconds
+            (legacy single-bar contract, kept for backward compat with the
+            existing progress-tick code path)
+          - scenes_state: [{index, status, started_at, finished_at, eta_seconds}]
+            (per-scene detail so the UI can render a real scene list)
         """
         j = JOBS.get(job_id)
         if not j:
             return
         done_count = sum(1 for s in scene_states.values() if s == "succeeded")
+        failed_count = sum(1 for s in scene_states.values() if s == "failed")
         any_running = any(s == "running" for s in scene_states.values())
         j["scene_total"] = len(scenes)
+        j["scene_done"] = done_count
+        j["scene_failed"] = failed_count
+        j["scene_running"] = sum(1 for s in scene_states.values() if s == "running")
         # Cap at N so the UI shows 'Scene N/N' during the final concat step
         # rather than snapping past the total.
         j["scene_index"] = min(done_count + (1 if any_running else 0), len(scenes))
@@ -695,11 +720,23 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
         # First running scene stamps the aggregate start time.
         if any_running and not j.get("scene_started_at"):
             j["scene_started_at"] = time.time()
-            # ETA reflects the slowest scene, not the sum — that's the point
-            # of parallelism. Use the max duration in the plan as the anchor.
             slowest = max(scenes) if scenes else 6
             j["scene_eta_seconds"] = max(30, min(180, int(slowest * 5 + 10)))
         j["status"] = "rendering"
+
+        # Rebuild scenes_state from scratch so the UI always sees a consistent
+        # snapshot. Cheap — N is at most ~15 for the longest renders.
+        j["scenes_state"] = [
+            {
+                "index": i,
+                "duration": scenes[i],
+                "status": scene_states.get(i, "queued"),
+                "started_at": scene_started_at.get(i, 0.0),
+                "finished_at": scene_finished_at.get(i, 0.0),
+                "eta_seconds": max(20, min(180, int(scenes[i] * 5 + 10))),
+            }
+            for i in range(len(scenes))
+        ]
         save_jobs(JOBS)
 
     def _render_scene(idx: int, dur: int) -> tuple[int, bool, str, Path]:
@@ -714,7 +751,10 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
             )
 
         def _on_status(status: str):
+            prev = scene_states.get(idx)
             scene_states[idx] = status
+            if status == "running" and idx not in scene_started_at:
+                scene_started_at[idx] = time.time()
             _publish_agg_status()
 
         ok, err = render_one_scene(
@@ -723,6 +763,7 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
         )
         # Terminal state update (render_one_scene doesn't call on_status on exit)
         scene_states[idx] = "succeeded" if ok else "failed"
+        scene_finished_at[idx] = time.time()
         _publish_agg_status()
         return idx, ok, err, scene_out
 
