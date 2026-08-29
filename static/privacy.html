@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Privacy Policy — Not Hollywood</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#050607" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="legal.css" />
+  </head>
+  <body class="legal-body">
+    <nav id="nav" class="nav">
+      <div class="nav-inner">
+        <a href="/" class="wordmark">Not<span class="wordmark-accent">Hollywood</span></a>
+        <ul class="nav-tabs">
+          <li><a href="/">Studio</a></li>
+          <li><a href="/pricing.html">Pricing</a></li>
+        </ul>
+        <div class="nav-right">
+          <a class="btn-primary" href="/">
+            <span class="btn-plus">+</span> Create a Show
+          </a>
+        </div>
+      </div>
+    </nav>
+
+    <main class="legal-main">
+      <header class="legal-hero">
+        <p class="legal-eyebrow">Legal</p>
+        <h1 class="legal-title">Privacy Policy</h1>
+        <p class="legal-meta">Effective August 28, 2026</p>
+      </header>
+
+      <p>Not Hollywood ("we," "us," "our") respects your privacy. This Privacy Policy explains what personal information we collect when you use nothollywood.ai (the "Service"), how we use it, who we share it with, and the choices you have. If any of this concerns you, email <a href="mailto:zach@nothollywood.ai">zach@nothollywood.ai</a> before creating an account.</p>
+
+      <div class="legal-callout">
+        <p><strong>The short version.</strong> We collect the minimum needed to run the Service: your email, your prompts, the video we render for you, and your payment history. We never sell your data. We do not train our own AI models on your content. Stripe handles your card details — we never see them.</p>
+      </div>
+
+      <h2>1. Information We Collect</h2>
+
+      <h3>1.1 Information you give us</h3>
+      <ul>
+        <li><strong>Account information.</strong> Email address and password (hashed via Supabase Auth) when you sign up.</li>
+        <li><strong>Generation inputs.</strong> Text prompts, reference images, and generation settings you submit.</li>
+        <li><strong>Payment information.</strong> When you purchase credits, Stripe collects your card details directly. We receive from Stripe only: the last 4 digits of your card, your billing country, the amount charged, and Stripe's session/customer identifiers. We do not have access to your full card number, CVV, or expiration.</li>
+        <li><strong>Support correspondence.</strong> If you email us, we retain that correspondence to respond and improve the Service.</li>
+      </ul>
+
+      <h3>1.2 Information collected automatically</h3>
+      <ul>
+        <li><strong>Usage logs.</strong> IP address, browser user-agent, timestamps, pages viewed, and API calls made. Retained for 90 days for security and debugging, then discarded.</li>
+        <li><strong>Generated content.</strong> Video clips we render for you are stored so you can revisit them. You control deletion (see Section 5).</li>
+      </ul>
+
+      <h3>1.3 Cookies and similar technologies</h3>
+      <p>We use a single first-party session cookie (issued by Supabase Auth) to keep you signed in. We do not use advertising cookies, cross-site trackers, or third-party analytics that build behavioral profiles.</p>
+
+      <h2>2. How We Use Information</h2>
+      <p>We use the information listed above solely to:</p>
+      <ul>
+        <li>Provide and operate the Service (authenticate you, render your video, deduct credits);</li>
+        <li>Process payments and refunds via Stripe;</li>
+        <li>Send you transactional emails (purchase receipts, security alerts, service changes);</li>
+        <li>Investigate abuse, prevent fraud, and enforce our <a href="/terms.html">Terms of Service</a>;</li>
+        <li>Comply with legal obligations and respond to lawful requests.</li>
+      </ul>
+
+      <h2>3. What We Do <em>Not</em> Do</h2>
+      <ul>
+        <li>We <strong>do not sell</strong> your personal information.</li>
+        <li>We <strong>do not use your prompts or generated video to train our own AI models.</strong></li>
+        <li>We <strong>do not run advertising networks or third-party behavioral trackers</strong> on the site.</li>
+        <li>We <strong>do not share your generation content</strong> with anyone outside our essential service providers listed below.</li>
+      </ul>
+
+      <h2>4. Service Providers</h2>
+      <p>We rely on a small number of third-party processors to run the Service. Each receives only the data they need:</p>
+      <ul>
+        <li><strong><a href="https://stripe.com/privacy" target="_blank" rel="noopener">Stripe, Inc.</a></strong> — payment processing. Collects payment card and billing details directly.</li>
+        <li><strong><a href="https://supabase.com/privacy" target="_blank" rel="noopener">Supabase</a></strong> — authentication and database (email, hashed password, credit balance).</li>
+        <li><strong><a href="https://railway.com/legal/privacy" target="_blank" rel="noopener">Railway</a></strong> — application hosting (usage logs, server-side session data).</li>
+        <li><strong><a href="https://reapi.ai" target="_blank" rel="noopener">reAPI</a></strong> — proxy to the MiniMax H3 video model. Receives your prompt and reference images at generation time; does not receive your identity or email.</li>
+      </ul>
+      <p>Prompts and reference images sent to reAPI/MiniMax are governed by those providers' privacy terms. We recommend not including personal identifying details in prompts.</p>
+
+      <h2>5. Your Rights and Choices</h2>
+      <ul>
+        <li><strong>Access and download.</strong> Email <a href="mailto:zach@nothollywood.ai">zach@nothollywood.ai</a> for a copy of your account data.</li>
+        <li><strong>Delete a specific video.</strong> Use the delete control on any clip in your library.</li>
+        <li><strong>Delete your account.</strong> Email us and we will delete your account, remaining credit balance, and all associated generation content within 30 days. Aggregate financial records required for tax and audit purposes may be retained per applicable law.</li>
+        <li><strong>Correct your data.</strong> Update your email in account settings or email us.</li>
+        <li><strong>Unsubscribe.</strong> Transactional emails (receipts, security alerts) are required for account operation and cannot be unsubscribed while the account is active.</li>
+      </ul>
+      <p>If you are in California, the EEA, the UK, or another jurisdiction with statutory data-subject rights (GDPR, CCPA/CPRA), you additionally have the right to lodge a complaint with your local data-protection authority. We will honor verified requests within the timeframes those laws require.</p>
+
+      <h2>6. Data Retention</h2>
+      <ul>
+        <li>Account records and credit balance: for the life of your account, plus up to 30 days after deletion request.</li>
+        <li>Generated video: until you delete it or your account is deleted.</li>
+        <li>Server access logs: 90 days.</li>
+        <li>Payment records: 7 years, as required by U.S. tax law.</li>
+      </ul>
+
+      <h2>7. Security</h2>
+      <p>We use HTTPS for all traffic, hashed password storage via Supabase Auth, and least-privilege access controls on our infrastructure. No system is 100% secure. If we ever suffer a data breach affecting your personal information, we will notify affected users within 72 hours of confirmation, as required by applicable law.</p>
+
+      <h2>8. International Users</h2>
+      <p>The Service is hosted in the United States. If you access it from outside the U.S., you consent to the transfer of your information to the U.S., where privacy laws may differ from your home jurisdiction.</p>
+
+      <h2>9. Children</h2>
+      <p>The Service is not directed to children under 18. We do not knowingly collect personal information from children. If you believe a child has provided us with personal information, email <a href="mailto:zach@nothollywood.ai">zach@nothollywood.ai</a> and we will delete it.</p>
+
+      <h2>10. Changes to This Policy</h2>
+      <p>We may update this Policy from time to time. Material changes will be notified by email at least 14 days before they take effect. Non-material changes take effect on the date shown at the top of this page.</p>
+
+      <h2>11. Contact</h2>
+      <p>For privacy questions, requests, or complaints, email <a href="mailto:zach@nothollywood.ai">zach@nothollywood.ai</a>.</p>
+
+      <footer class="legal-footer">
+        <a href="/">Not Hollywood</a>
+        <a href="/pricing.html">Pricing</a>
+        <a href="/terms.html">Terms</a>
+        <a href="/privacy.html">Privacy</a>
+        <a href="/refunds.html">Refunds</a>
+        <span>© 2026 Not Hollywood</span>
+      </footer>
+    </main>
+  </body>
+</html>

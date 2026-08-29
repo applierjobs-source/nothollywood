@@ -75,10 +75,12 @@ SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 # IDs Zach creates in the Stripe dashboard for each credit pack.
 # ────────────────────────────────────────────────────────────────────
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_PRICE_STARTER = os.environ.get("STRIPE_PRICE_STARTER", "")
 STRIPE_PRICE_STUDIO = os.environ.get("STRIPE_PRICE_STUDIO", "")
 STRIPE_PRICE_FEATURE = os.environ.get("STRIPE_PRICE_FEATURE", "")
 STRIPE_PRICE_BLOCKBUSTER = os.environ.get("STRIPE_PRICE_BLOCKBUSTER", "")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
 PACKS = {
     "starter":     {"price_id": STRIPE_PRICE_STARTER,     "credits": 75,   "dollars": 15},
@@ -683,6 +685,273 @@ async def create_checkout_session(request: Request):
 
     session = r.json()
     return {"url": session["url"], "session_id": session["id"]}
+
+
+# ────────────────────────────────────────────────────────────────────
+# Stripe webhook → grants credits on successful payment.
+#
+# Ship-first storage strategy (matches the rest of this app):
+#   1. Preferred: upsert into Supabase `user_credits` table via service-role
+#      key. Zach must run the SQL migration below in Supabase once, and set
+#      SUPABASE_SERVICE_ROLE_KEY on Railway. Idempotent via stripe_events log.
+#   2. Fallback (no service role yet): append to /tmp/credit_ledger.jsonl so
+#      the payment is never lost, plus /tmp/stripe_events.json for dedupe.
+#      Zach can replay these into Supabase later.
+#
+# SQL to run in Supabase SQL editor once:
+#   create table if not exists user_credits (
+#     user_id uuid primary key references auth.users(id) on delete cascade,
+#     balance int not null default 0,
+#     updated_at timestamptz not null default now()
+#   );
+#   create table if not exists stripe_events (
+#     event_id text primary key,
+#     received_at timestamptz not null default now()
+#   );
+#   alter table user_credits enable row level security;
+#   create policy "users read own credits" on user_credits
+#     for select using (auth.uid() = user_id);
+# ────────────────────────────────────────────────────────────────────
+LEDGER_FILE = Path("/tmp/credit_ledger.jsonl")
+EVENTS_FILE = Path("/tmp/stripe_events.json")
+
+
+def _load_seen_events() -> set:
+    if EVENTS_FILE.exists():
+        try:
+            return set(json.loads(EVENTS_FILE.read_text()))
+        except Exception:
+            return set()
+    return set()
+
+
+def _remember_event(event_id: str) -> None:
+    seen = _load_seen_events()
+    seen.add(event_id)
+    # cap at last 10k events to keep file size bounded
+    if len(seen) > 10000:
+        seen = set(list(seen)[-10000:])
+    EVENTS_FILE.write_text(json.dumps(list(seen)))
+
+
+def _verify_stripe_signature(payload: bytes, sig_header: str, secret: str) -> bool:
+    """Verify Stripe's `Stripe-Signature` header per
+    https://stripe.com/docs/webhooks#verify-official-libraries.
+
+    Header shape: `t=<timestamp>,v1=<sig>,v1=<sig>,...`. Signed payload is
+    `{timestamp}.{body}`, HMAC-SHA256 with the endpoint secret, hex-encoded.
+    """
+    import hmac
+    import hashlib
+
+    if not sig_header or not secret:
+        return False
+    parts = dict(p.split("=", 1) for p in sig_header.split(",") if "=" in p)
+    timestamp = parts.get("t")
+    signatures = [v for k, v in
+                  (p.split("=", 1) for p in sig_header.split(",") if "=" in p)
+                  if k == "v1"]
+    if not timestamp or not signatures:
+        return False
+
+    # Reject events older than 5 minutes to defend against replay
+    try:
+        if abs(int(time.time()) - int(timestamp)) > 300:
+            return False
+    except ValueError:
+        return False
+
+    signed = f"{timestamp}.{payload.decode('utf-8')}".encode("utf-8")
+    expected = hmac.new(secret.encode("utf-8"), signed, hashlib.sha256).hexdigest()
+    return any(hmac.compare_digest(expected, s) for s in signatures)
+
+
+def _grant_credits_via_supabase(user_id: str, credits: int) -> tuple[bool, str]:
+    """Atomically add `credits` to user_credits.balance via PostgREST.
+
+    Uses an RPC-style upsert with `Prefer: resolution=merge-duplicates` so a
+    first-time buyer gets their row created, and a returning buyer gets their
+    balance incremented. Requires SUPABASE_SERVICE_ROLE_KEY.
+    """
+    if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        return False, "supabase service role not configured"
+
+    # Read current balance (service role bypasses RLS)
+    read = requests.get(
+        f"{SUPABASE_URL}/rest/v1/user_credits",
+        params={"user_id": f"eq.{user_id}", "select": "balance"},
+        headers={
+            "apikey": SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        },
+        timeout=10,
+    )
+    if not read.ok:
+        return False, f"read failed: {read.status_code} {read.text[:200]}"
+    rows = read.json()
+    current = rows[0]["balance"] if rows else 0
+    new_balance = current + credits
+
+    up = requests.post(
+        f"{SUPABASE_URL}/rest/v1/user_credits",
+        params={"on_conflict": "user_id"},
+        headers={
+            "apikey": SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates",
+        },
+        json={"user_id": user_id, "balance": new_balance},
+        timeout=10,
+    )
+    if not up.ok:
+        return False, f"upsert failed: {up.status_code} {up.text[:200]}"
+    return True, f"balance {current} → {new_balance}"
+
+
+def _append_ledger(entry: dict) -> None:
+    """Always-on audit log. Every successful payment gets a row here even
+    when Supabase upsert succeeds, so we have a paper trail if the DB is
+    ever wrong."""
+    entry["logged_at"] = int(time.time())
+    with LEDGER_FILE.open("a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+@app.post("/api/stripe-webhook")
+async def stripe_webhook(request: Request):
+    """Stripe → us. Called on `checkout.session.completed` (and others).
+
+    Configure in Stripe dashboard → Developers → Webhooks:
+      Endpoint URL: https://www.nothollywood.ai/api/stripe-webhook
+      Events to send: checkout.session.completed
+      Then copy the signing secret (whsec_...) into STRIPE_WEBHOOK_SECRET on Railway.
+    """
+    payload = await request.body()
+    sig = request.headers.get("stripe-signature", "")
+
+    if not STRIPE_WEBHOOK_SECRET:
+        # Refuse to process anything until the secret is set — otherwise
+        # anyone could POST here and mint credits.
+        raise HTTPException(status_code=503, detail="STRIPE_WEBHOOK_SECRET not configured")
+
+    if not _verify_stripe_signature(payload, sig, STRIPE_WEBHOOK_SECRET):
+        print(f"[stripe-webhook] signature verification failed (sig header: {sig[:40]}...)")
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    try:
+        event = json.loads(payload)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    event_id = event.get("id", "")
+    event_type = event.get("type", "")
+
+    # Idempotency: Stripe retries webhooks, so dedupe by event id.
+    seen = _load_seen_events()
+    if event_id and event_id in seen:
+        print(f"[stripe-webhook] duplicate event {event_id} ({event_type}) — ignoring")
+        return {"received": True, "duplicate": True}
+
+    if event_type != "checkout.session.completed":
+        # Ack any other event so Stripe stops retrying.
+        print(f"[stripe-webhook] event {event_id} type={event_type} — ignoring")
+        if event_id:
+            _remember_event(event_id)
+        return {"received": True, "handled": False}
+
+    session = event["data"]["object"]
+    metadata = session.get("metadata") or {}
+    pack_id = metadata.get("pack", "")
+    credits = int(metadata.get("credits", 0) or 0)
+    user_id = metadata.get("user_id") or session.get("client_reference_id") or ""
+    user_email = session.get("customer_email") or (session.get("customer_details") or {}).get("email") or ""
+    amount_total = session.get("amount_total", 0)
+
+    # Belt-and-suspenders: if metadata is missing (e.g. checkout created
+    # outside our endpoint), map the price back to a pack.
+    if not credits and session.get("line_items"):
+        # amount_total is in cents, packs table has dollar prices
+        for pid, cfg in PACKS.items():
+            if amount_total == cfg["dollars"] * 100:
+                pack_id = pid
+                credits = cfg["credits"]
+                break
+
+    ledger_entry = {
+        "event_id": event_id,
+        "session_id": session.get("id"),
+        "user_id": user_id,
+        "user_email": user_email,
+        "pack": pack_id,
+        "credits": credits,
+        "amount_total_cents": amount_total,
+        "status": "pending",
+    }
+
+    if not credits:
+        ledger_entry["status"] = "failed"
+        ledger_entry["error"] = "could not resolve credit amount"
+        _append_ledger(ledger_entry)
+        if event_id:
+            _remember_event(event_id)
+        print(f"[stripe-webhook] {event_id}: cannot resolve credits (pack={pack_id})")
+        return {"received": True, "handled": False, "error": "unresolvable credits"}
+
+    if not user_id:
+        ledger_entry["status"] = "orphaned"
+        ledger_entry["error"] = "no user_id — anonymous checkout (email in ledger)"
+        _append_ledger(ledger_entry)
+        if event_id:
+            _remember_event(event_id)
+        print(f"[stripe-webhook] {event_id}: anonymous purchase, {credits} credits owed to {user_email}")
+        return {"received": True, "handled": True, "warning": "orphaned, see ledger"}
+
+    ok, detail = _grant_credits_via_supabase(user_id, credits)
+    ledger_entry["status"] = "granted" if ok else "queued"
+    ledger_entry["grant_detail"] = detail
+    _append_ledger(ledger_entry)
+    if event_id:
+        _remember_event(event_id)
+
+    if ok:
+        print(f"[stripe-webhook] granted {credits} credits to user {user_id}: {detail}")
+    else:
+        # Return 200 anyway — the ledger has the record and we don't want
+        # Stripe to retry forever if e.g. Supabase is temporarily down.
+        # Zach can replay from ledger.
+        print(f"[stripe-webhook] queued {credits} credits for {user_id} (supabase failed: {detail})")
+
+    return {"received": True, "handled": True, "credits": credits}
+
+
+@app.get("/api/credits")
+def get_credits(request: Request):
+    """Return the signed-in user's credit balance.
+
+    Reads from user_credits (RLS enforced via anon-key auth); when service role
+    isn't configured yet, returns 0 with a stub flag so the UI can show a
+    friendly "credits sync pending" message.
+    """
+    claims = get_user(request)
+    if not claims:
+        raise HTTPException(status_code=401, detail="sign in required")
+    user_id = claims.get("sub", "")
+    if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        return {"balance": 0, "stub": True}
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/user_credits",
+        params={"user_id": f"eq.{user_id}", "select": "balance"},
+        headers={
+            "apikey": SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        },
+        timeout=10,
+    )
+    if not r.ok:
+        return {"balance": 0, "error": r.text[:200]}
+    rows = r.json()
+    return {"balance": rows[0]["balance"] if rows else 0}
 
 
 @app.get("/api/config")

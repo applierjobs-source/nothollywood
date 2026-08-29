@@ -830,6 +830,21 @@ body::before {
 }
 .page-footer-inner p { margin: 0 0 8px; }
 .page-footer-inner b { color: var(--text-mid); font-weight: 600; }
+.footer-fine-links {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.footer-fine-links a {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.55);
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+.footer-fine-links a:hover {
+  color: rgba(255, 255, 255, 0.95);
+}
 .footer-fine {
   font-family: var(--f-mono);
   font-size: 10.5px;
