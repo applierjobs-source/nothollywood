@@ -959,14 +959,16 @@ el.authForm.addEventListener("submit", async (e) => {
   try {
     let resp;
     if (authMode === "signup") {
+      // We disable email confirmation in Supabase — sign-up should return an
+      // active session immediately. If for any reason no session comes back
+      // (e.g. someone re-enabled Confirm email in the dashboard), fall through
+      // to an immediate password sign-in rather than telling the user to check
+      // their email.
       resp = await sb.auth.signUp({ email, password });
       if (resp.error) throw resp.error;
       if (resp.data && resp.data.user && !resp.data.session) {
-        el.authError.hidden = false;
-        el.authError.style.color = "#9be7a0";
-        el.authError.textContent = "Check your email to confirm your account, then sign in.";
-        setAuthMode("signin");
-        return;
+        const signIn = await sb.auth.signInWithPassword({ email, password });
+        if (signIn.error) throw signIn.error;
       }
     } else {
       resp = await sb.auth.signInWithPassword({ email, password });
