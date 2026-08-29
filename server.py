@@ -88,6 +88,16 @@ STRIPE_PRICE_FEATURE = os.environ.get("STRIPE_PRICE_FEATURE", "")
 STRIPE_PRICE_BLOCKBUSTER = os.environ.get("STRIPE_PRICE_BLOCKBUSTER", "")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
+# ────────────────────────────────────────────────────────────────────
+# Transactional email via Resend. Optional — if RESEND_API_KEY is unset
+# we simply skip sending the completion email (job still finishes). Set
+# EMAIL_FROM to a verified Resend sender, e.g. "Not Hollywood <hello@
+# nothollywood.ai>"; falls back to onboarding@resend.dev for local dev.
+# ────────────────────────────────────────────────────────────────────
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+EMAIL_FROM = os.environ.get("EMAIL_FROM", "Not Hollywood <onboarding@resend.dev>")
+SITE_URL = os.environ.get("SITE_URL", "https://www.nothollywood.ai").rstrip("/")
+
 PACKS = {
     "starter":     {"price_id": STRIPE_PRICE_STARTER,     "credits": 75,   "dollars": 15},
     "studio":      {"price_id": STRIPE_PRICE_STUDIO,      "credits": 500,  "dollars": 75},
@@ -513,6 +523,115 @@ def render_one_scene(
     return False, "scene timed out after 8 minutes"
 
 
+def send_completion_email(user_email: str, job: dict) -> None:
+    """Best-effort email notification when a render finishes.
+
+    No-op if RESEND_API_KEY is unset or user_email is missing. Never raises —
+    a bad email must not fail a completed render. Logs to stdout so Railway
+    captures the outcome.
+    """
+    if not RESEND_API_KEY or not user_email:
+        return
+    try:
+        job_id = job.get("id", "")
+        status = job.get("status", "")
+        duration = job.get("duration", 0)
+        prompt = (job.get("prompt") or "").strip()
+        preview = prompt[:80] + ("…" if len(prompt) > 80 else "")
+        video_path = job.get("video") or ""
+        video_url = f"{SITE_URL}{video_path}" if video_path else f"{SITE_URL}/#job-{job_id}"
+        library_url = f"{SITE_URL}/#job-{job_id}"
+
+        if status == "done":
+            subject = f"Your Not Hollywood render is ready — {duration}s"
+            heading = "Your show is ready."
+            body_html = (
+                f'<p style="margin:0 0 12px;font-size:15px;color:#e8e8e8;">'
+                f'“{preview}”</p>'
+                f'<p style="margin:0 0 20px;font-size:14px;color:#a8a8a8;">'
+                f'{duration} seconds · {job.get("resolution", "768P")}</p>'
+                f'<p style="margin:0 0 24px;">'
+                f'<a href="{video_url}" '
+                f'style="display:inline-block;background:#e5322f;color:#fff;'
+                f'text-decoration:none;padding:12px 22px;border-radius:6px;'
+                f'font-weight:600;">Watch it now</a></p>'
+                f'<p style="margin:0;font-size:13px;color:#7a7a7a;">'
+                f'Or open your library: '
+                f'<a href="{library_url}" style="color:#e5322f;">{library_url}</a></p>'
+            )
+            plain = (
+                f"Your Not Hollywood render is ready.\n\n"
+                f'"{preview}"\n'
+                f"{duration} seconds · {job.get('resolution', '768P')}\n\n"
+                f"Watch it: {video_url}\n"
+                f"Library: {library_url}\n"
+            )
+        elif status == "failed":
+            err = job.get("error", "unknown error")
+            subject = "Your Not Hollywood render didn\u2019t finish"
+            heading = "Your render didn\u2019t finish."
+            body_html = (
+                f'<p style="margin:0 0 12px;font-size:15px;color:#e8e8e8;">'
+                f'“{preview}”</p>'
+                f'<p style="margin:0 0 20px;font-size:14px;color:#ff8a8a;">'
+                f'Error: {err[:200]}</p>'
+                f'<p style="margin:0 0 24px;font-size:14px;color:#a8a8a8;">'
+                f'Your credits were refunded. Try again from your library.</p>'
+                f'<p style="margin:0;">'
+                f'<a href="{library_url}" '
+                f'style="display:inline-block;background:#333;color:#fff;'
+                f'text-decoration:none;padding:12px 22px;border-radius:6px;'
+                f'font-weight:600;">Open library</a></p>'
+            )
+            plain = (
+                f"Your Not Hollywood render didn't finish.\n\n"
+                f'"{preview}"\n'
+                f"Error: {err[:200]}\n\n"
+                f"Your credits were refunded.\n"
+                f"Library: {library_url}\n"
+            )
+        else:
+            return  # only email on terminal states
+
+        html = (
+            f'<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;'
+            f'background:#0b0b0b;padding:40px 20px;">'
+            f'<div style="max-width:520px;margin:0 auto;background:#141414;'
+            f'border-radius:12px;padding:36px 32px;">'
+            f'<div style="font-weight:800;font-size:20px;letter-spacing:.02em;'
+            f'color:#e5322f;margin-bottom:24px;">NOT HOLLYWOOD</div>'
+            f'<h1 style="margin:0 0 20px;font-size:22px;color:#fff;">{heading}</h1>'
+            f'{body_html}'
+            f'</div>'
+            f'<p style="max-width:520px;margin:16px auto 0;text-align:center;'
+            f'font-size:12px;color:#5a5a5a;">'
+            f'You received this because you rendered a video at nothollywood.ai.</p>'
+            f'</div>'
+        )
+
+        r = requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "from": EMAIL_FROM,
+                "to": [user_email],
+                "subject": subject,
+                "html": html,
+                "text": plain,
+            },
+            timeout=15,
+        )
+        if r.status_code >= 300:
+            print(f"[email {job_id}] resend {r.status_code}: {r.text[:200]}")
+        else:
+            print(f"[email {job_id}] sent to {user_email}")
+    except Exception as e:
+        print(f"[email {job.get('id','?')}] send failed: {e}")
+
+
 def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
     """Render each scene sequentially (chaining last-frame -> next-frame ref),
     then concatenate the results into one video."""
@@ -535,6 +654,15 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
         j = JOBS.get(job_id)
         if not j:
             return
+        # First time we see a running status for this scene, stamp the start
+        # time so the frontend can show a time-based progress bar. The estimate
+        # (scene_eta_seconds) is a rough per-scene wall clock — empirically
+        # reAPI's MiniMax H3 takes ~5× the clip duration plus ~10s of overhead
+        # for submit + finalize, capped so multi-minute waits still show motion.
+        if status == "running" and not j.get("scene_started_at"):
+            j["scene_started_at"] = time.time()
+            clip_dur = scenes[idx] if idx < len(scenes) else 6
+            j["scene_eta_seconds"] = max(30, min(180, int(clip_dur * 5 + 10)))
         j["scene_status"] = status
         j["scene_index"] = idx + 1
         j["scene_total"] = len(scenes)
@@ -542,6 +670,13 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
         save_jobs(JOBS)
 
     for i, dur in enumerate(scenes):
+        # Reset per-scene timing so multi-scene renders get a fresh progress bar
+        # at each hop instead of the timer sticking on scene 1.
+        j = JOBS.get(job_id)
+        if j:
+            j["scene_started_at"] = 0
+            j["scene_eta_seconds"] = 0
+            save_jobs(JOBS)
         scene_prompt = prompt
         if len(scenes) > 1:
             scene_prompt = (
@@ -557,7 +692,9 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
         if not ok:
             job["status"] = "failed"
             job["error"] = f"scene {i+1}/{len(scenes)}: {err}"
+            job["finished_at"] = time.time()
             save_jobs(JOBS)
+            send_completion_email(job.get("user_email") or "", job)
             return
         scene_paths.append(scene_out)
 
@@ -619,7 +756,9 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
     else:
         j["status"] = "failed"
         j["error"] = f"finalize failed: {err}"
+        j["finished_at"] = time.time()
     save_jobs(JOBS)
+    send_completion_email(j.get("user_email") or "", j)
 
 
 @app.post("/api/create-checkout-session")

@@ -561,12 +561,53 @@ function renderTile(job) {
   const isFailed = job.status === "failed";
 
   if (isActive) {
-    const pct = job.scene_total > 1
-      ? Math.round(((job.scene_index || 0) / job.scene_total) * 100)
-      : 20;
-    const sceneLine = job.scene_total > 1
-      ? `Scene ${job.scene_index || 0}/${job.scene_total} · ${escapeHtml(job.scene_status || job.status)}`
-      : escapeHtml(job.status);
+    // Progress model:
+    //   - Base fraction from completed scenes (0/N … (N-1)/N).
+    //   - Add the current scene's fraction, computed from wall-clock time
+    //     against the backend's per-scene ETA. Caps at 95% until we get
+    //     a real done/failed status so users never see 100% while waiting.
+    //   - Falls back to 8% shimmer before the first scene reports running.
+    const total = job.scene_total || 1;
+    const idx = Math.max(0, (job.scene_index || 1) - 1); // 0-based
+    let currentSceneFrac = 0;
+    if (job.scene_started_at && job.scene_eta_seconds) {
+      const elapsed = (Date.now() / 1000) - job.scene_started_at;
+      currentSceneFrac = Math.min(0.98, elapsed / job.scene_eta_seconds);
+    } else if ((job.scene_status || "") === "queued" || !job.scene_status) {
+      currentSceneFrac = 0.05;
+    } else {
+      currentSceneFrac = 0.10;
+    }
+    if ((job.scene_status || "") === "succeeded") currentSceneFrac = 1;
+    const rawPct = ((idx + currentSceneFrac) / total) * 100;
+    const pct = Math.max(3, Math.min(95, Math.round(rawPct)));
+
+    // Human-readable status label. Backend statuses are terse ("running",
+    // "queued", "succeeded", "stitching") — map them to sentences.
+    const statusLabel = (() => {
+      const s = (job.scene_status || job.status || "").toLowerCase();
+      if (job.status === "stitching") return "Finalizing your video…";
+      if (s === "queued" || s === "") return "Warming up the studio…";
+      if (s === "submitting" || s === "grok_submitting") return "Sending scene to the render farm…";
+      if (s === "running") return "Rendering pixels one frame at a time…";
+      if (s === "succeeded") return "Downloading your scene…";
+      return `Status: ${s}`;
+    })();
+    // ETA remaining, when we have the data
+    let etaBit = "";
+    if (job.scene_started_at && job.scene_eta_seconds) {
+      const elapsed = (Date.now() / 1000) - job.scene_started_at;
+      const remaining = Math.max(0, job.scene_eta_seconds - elapsed);
+      if (remaining > 3) {
+        etaBit = ` · ~${Math.round(remaining)}s remaining`;
+      } else if (currentSceneFrac >= 0.95) {
+        etaBit = " · almost done";
+      }
+    }
+    const sceneCounter = job.scene_total > 1
+      ? `Scene ${job.scene_index || 1}/${job.scene_total} · `
+      : "";
+    const sceneLine = `${sceneCounter}${statusLabel}${etaBit}`;
     return `
       <div class="tile tile-active" data-id="${escapeHtml(job.id)}">
         <span class="tile-badge rendering">${escapeHtml(job.status.toUpperCase())}</span>
@@ -886,6 +927,7 @@ async function refreshJobs() {
     renderHero();
     renderShelves();
     schedulePoll();
+    startProgressTick();
   } catch (err) {
     if (!jobs) jobs = [];
     renderHero();
@@ -899,6 +941,44 @@ function schedulePoll() {
   if (hasActive) {
     pollTimer = setTimeout(refreshJobs, POLL_MS);
   }
+}
+
+// Between full poll cycles, tick the progress bar and ETA text every 250ms
+// so the bar visibly advances instead of jumping every 3 seconds. Only touches
+// the visible progress-fill width and the ETA suffix — the tile itself isn't
+// re-rendered, so users can still interact with links/buttons on it.
+let tickTimer = null;
+function startProgressTick() {
+  if (tickTimer) return;
+  tickTimer = setInterval(() => {
+    const active = jobs.filter((j) => j.status !== "done" && j.status !== "failed");
+    if (!active.length) {
+      clearInterval(tickTimer);
+      tickTimer = null;
+      return;
+    }
+    for (const job of active) {
+      if (!job.scene_started_at || !job.scene_eta_seconds) continue;
+      const total = job.scene_total || 1;
+      const idx = Math.max(0, (job.scene_index || 1) - 1);
+      const elapsed = (Date.now() / 1000) - job.scene_started_at;
+      let frac = Math.min(0.98, elapsed / job.scene_eta_seconds);
+      if ((job.scene_status || "") === "succeeded") frac = 1;
+      const rawPct = ((idx + frac) / total) * 100;
+      const pct = Math.max(3, Math.min(95, Math.round(rawPct)));
+      const tile = document.querySelector(`.tile-active[data-id="${job.id}"]`);
+      if (!tile) continue;
+      const fill = tile.querySelector(".tile-active-progress-fill");
+      if (fill) fill.style.width = pct + "%";
+      const remaining = Math.max(0, job.scene_eta_seconds - elapsed);
+      const sceneLineEl = tile.querySelector(".tile-active-scene");
+      if (sceneLineEl && remaining > 3 && (job.scene_status || "") === "running") {
+        const current = sceneLineEl.textContent;
+        const base = current.replace(/ · ~?\d+s remaining$/, "").replace(/ · almost done$/, "");
+        sceneLineEl.textContent = `${base} · ~${Math.round(remaining)}s remaining`;
+      }
+    }
+  }, 250);
 }
 
 // ─── Init ──────────────────────────────────────────────────────────
