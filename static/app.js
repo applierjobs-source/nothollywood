@@ -37,6 +37,8 @@ const el = {
   navUser: $("#navUser"),
   navUserEmail: $("#navUserEmail"),
   navSignOutBtn: $("#navSignOutBtn"),
+  navCredits: $("#navCredits"),
+  navCreditsValue: $("#navCreditsValue"),
   authModal: $("#authModal"),
   authForm: $("#authForm"),
   authEmail: $("#authEmail"),
@@ -171,12 +173,35 @@ function renderAuthUI() {
     el.navUser.hidden = false;
     el.navUserEmail.textContent = currentUser.email || "signed in";
     el.shelfRenders.hidden = false;
+    refreshCredits(); // fire and forget — fills the chip when it lands
   } else {
     el.navSignInBtn.hidden = false;
     el.navUser.hidden = true;
+    if (el.navCredits) el.navCredits.hidden = true;
     // Hide user library + active shelf when signed out — showcase remains.
     el.shelfRenders.hidden = true;
     el.shelfActive.hidden = true;
+  }
+}
+
+// Fetches the current user's credit balance from the backend and paints the
+// nav chip. Silent on failure (chip just stays hidden) so a broken creds
+// endpoint never blocks the app.
+let lastCreditsBalance = null;
+async function refreshCredits() {
+  if (!currentUser || !el.navCredits) return;
+  try {
+    const r = await authedFetch(`${API}/api/credits`);
+    if (!r.ok) return;
+    const data = await r.json();
+    const bal = Number(data.balance) || 0;
+    lastCreditsBalance = bal;
+    el.navCreditsValue.textContent = bal.toLocaleString();
+    el.navCredits.hidden = false;
+    el.navCredits.classList.toggle("low", bal < 10);
+  } catch (err) {
+    // Silent: keep the chip hidden if the endpoint is unreachable.
+    console.warn("credits fetch failed", err);
   }
 }
 
@@ -923,7 +948,20 @@ async function refreshJobs() {
     const r = await authedFetch(`${API}/api/jobs`);
     if (!r.ok) throw new Error("failed");
     const remote = await r.json();
+    const priorActiveIds = new Set(
+      (jobs || []).filter((j) => j.status !== "done" && j.status !== "failed").map((j) => j.id)
+    );
     jobs = Array.isArray(remote) ? remote : [];
+    // If any job just transitioned out of the active set, credits may have
+    // changed (charged on render, refunded on failure). Repaint the chip.
+    const stillActiveIds = new Set(
+      jobs.filter((j) => j.status !== "done" && j.status !== "failed").map((j) => j.id)
+    );
+    let flipped = false;
+    for (const id of priorActiveIds) {
+      if (!stillActiveIds.has(id)) { flipped = true; break; }
+    }
+    if (flipped) refreshCredits();
     renderHero();
     renderShelves();
     schedulePoll();
@@ -1090,6 +1128,12 @@ el.authForm.addEventListener("submit", async (e) => {
     }
     closeModal(el.authModal);
     el.authForm.reset();
+    // UX: after successful signup or signin, drop the user straight into
+    // the composer so they don't land on the marketing shell wondering what
+    // to click. Small delay lets renderAuthUI paint the nav chip first.
+    setTimeout(() => {
+      if (typeof openComposer === "function") openComposer();
+    }, 150);
   } catch (err) {
     el.authError.hidden = false;
     el.authError.textContent = (err && err.message) || String(err);

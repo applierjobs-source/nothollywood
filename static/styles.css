@@ -1505,6 +1505,37 @@ textarea::placeholder { color: var(--text-faint); }
   font-size: 11px;
   border-radius: 999px;
 }
+.nav-credits {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: rgba(229, 50, 47, 0.14);
+  border: 1px solid rgba(229, 50, 47, 0.35);
+  color: #ff8a86;
+  font-family: var(--f-mono);
+  text-decoration: none;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.nav-credits:hover {
+  background: rgba(229, 50, 47, 0.22);
+  border-color: rgba(229, 50, 47, 0.55);
+}
+.nav-credits-value {
+  font-size: 13px;
+  font-weight: 700;
+  color: #ffb0ad;
+}
+.nav-credits-label {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 176, 173, 0.7);
+}
+.nav-credits.low .nav-credits-value {
+  color: #ff5a55;
+}
 
 .auth-card {
   max-width: 480px;
