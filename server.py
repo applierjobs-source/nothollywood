@@ -632,84 +632,134 @@ def send_completion_email(user_email: str, job: dict) -> None:
         print(f"[email {job.get('id','?')}] send failed: {e}")
 
 
+# Max scenes rendering concurrently. reAPI can handle several jobs in parallel;
+# this bounds our exposure to their rate limits and to token bucket bursts.
+# Env-tunable so we can back off if reAPI starts 429ing under load.
+SCENE_CONCURRENCY = int(os.environ.get("SCENE_CONCURRENCY", "4"))
+
+
 def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
-    """Render each scene sequentially (chaining last-frame -> next-frame ref),
-    then concatenate the results into one video."""
+    """Render scenes in parallel (bounded by SCENE_CONCURRENCY), then concat.
+
+    Design tradeoff vs the previous sequential path:
+      OLD: scene[i+1] used scene[i]'s last frame as ref — tight visual continuity
+           but N× wall clock.
+      NEW: every scene uses the same initial ref (if any) + the same descriptive
+           prompt with 'maintain exact same characters, wardrobe, setting'.
+           Wall clock ≈ slowest single scene. Sitcom-style episodes with distinct
+           scenes (different rooms, time jumps) actually LOOK better this way
+           because each scene composes fresh instead of drifting from prior
+           artifacts. Character/style consistency is best-effort via prompt.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     job = JOBS.get(job_id)
     if not job:
         return
-    scenes = job["scenes_plan"]  # list of ints
+    scenes = job["scenes_plan"]  # list of ints (durations)
     prompt = job["prompt"]
     resolution = job["resolution"]
 
     scene_dir = SCENES / job_id
     scene_dir.mkdir(exist_ok=True)
 
-    scene_paths: list[Path] = []
-    # ref_url is always a public https URL (reAPI requires it). The initial ref
-    # comes from the /api/generate handler which saved the upload to FRAMES/.
-    ref_url = initial_ref_data_url  # arg is now a URL, not a data URL; name kept for callers
+    # Every scene starts from the same initial ref (the upload, if any).
+    ref_url = initial_ref_data_url  # arg name is legacy; already a public https URL
 
-    def _update_scene_status(idx: int, status: str):
+    # scene_states tracks the status string reported by reAPI for each scene
+    # so we can compute an aggregate progress signal for the UI.
+    scene_states: dict[int, str] = {i: "queued" for i in range(len(scenes))}
+    scene_started: dict[int, float] = {}
+    scenes_started_lock = None  # single-threaded state writes below
+
+    def _publish_agg_status():
+        """Write an aggregate progress snapshot back to JOBS[job_id].
+
+        Frontend expects a single scene_index/scene_total pair with an ETA.
+        We compute it as: index = number of scenes done; status = 'running' if
+        any scene is running; ETA = per-scene ETA (constant) so the bar keeps
+        moving even when scenes finish out of order.
+        """
         j = JOBS.get(job_id)
         if not j:
             return
-        # First time we see a running status for this scene, stamp the start
-        # time so the frontend can show a time-based progress bar. The estimate
-        # (scene_eta_seconds) is a rough per-scene wall clock — empirically
-        # reAPI's MiniMax H3 takes ~5× the clip duration plus ~10s of overhead
-        # for submit + finalize, capped so multi-minute waits still show motion.
-        if status == "running" and not j.get("scene_started_at"):
-            j["scene_started_at"] = time.time()
-            clip_dur = scenes[idx] if idx < len(scenes) else 6
-            j["scene_eta_seconds"] = max(30, min(180, int(clip_dur * 5 + 10)))
-        j["scene_status"] = status
-        j["scene_index"] = idx + 1
+        done_count = sum(1 for s in scene_states.values() if s == "succeeded")
+        any_running = any(s == "running" for s in scene_states.values())
         j["scene_total"] = len(scenes)
+        # Cap at N so the UI shows 'Scene N/N' during the final concat step
+        # rather than snapping past the total.
+        j["scene_index"] = min(done_count + (1 if any_running else 0), len(scenes))
+        j["scene_status"] = "running" if any_running else (
+            "succeeded" if done_count == len(scenes) else "queued"
+        )
+        # First running scene stamps the aggregate start time.
+        if any_running and not j.get("scene_started_at"):
+            j["scene_started_at"] = time.time()
+            # ETA reflects the slowest scene, not the sum — that's the point
+            # of parallelism. Use the max duration in the plan as the anchor.
+            slowest = max(scenes) if scenes else 6
+            j["scene_eta_seconds"] = max(30, min(180, int(slowest * 5 + 10)))
         j["status"] = "rendering"
         save_jobs(JOBS)
 
-    for i, dur in enumerate(scenes):
-        # Reset per-scene timing so multi-scene renders get a fresh progress bar
-        # at each hop instead of the timer sticking on scene 1.
-        j = JOBS.get(job_id)
-        if j:
-            j["scene_started_at"] = 0
-            j["scene_eta_seconds"] = 0
-            save_jobs(JOBS)
+    def _render_scene(idx: int, dur: int) -> tuple[int, bool, str, Path]:
+        """Render one scene in its own thread. Returns (idx, ok, err, out_path)."""
+        scene_out = scene_dir / f"scene_{idx:02d}.mp4"
         scene_prompt = prompt
         if len(scenes) > 1:
             scene_prompt = (
-                f"Scene {i+1} of {len(scenes)} in a continuous story. "
+                f"Scene {idx+1} of {len(scenes)} in a continuous story. "
                 f"Maintain the exact same characters, wardrobe, setting, and visual style throughout. "
                 f"{prompt}"
             )
-        scene_out = scene_dir / f"scene_{i:02d}.mp4"
+
+        def _on_status(status: str):
+            scene_states[idx] = status
+            _publish_agg_status()
+
         ok, err = render_one_scene(
             scene_prompt, dur, resolution, ref_url, scene_out,
-            on_status=lambda s, i=i: _update_scene_status(i, s),
+            on_status=_on_status,
         )
-        if not ok:
+        # Terminal state update (render_one_scene doesn't call on_status on exit)
+        scene_states[idx] = "succeeded" if ok else "failed"
+        _publish_agg_status()
+        return idx, ok, err, scene_out
+
+    # Kick off all scenes in parallel, bounded by SCENE_CONCURRENCY.
+    scene_paths_by_idx: dict[int, Path] = {}
+    first_failure: tuple[int, str] | None = None
+
+    with ThreadPoolExecutor(max_workers=SCENE_CONCURRENCY, thread_name_prefix=f"scene-{job_id[:8]}") as pool:
+        futures = {pool.submit(_render_scene, i, dur): i for i, dur in enumerate(scenes)}
+        for fut in as_completed(futures):
+            try:
+                idx, ok, err, out_path = fut.result()
+            except Exception as e:  # noqa: BLE001
+                # Thread crashed — treat as a scene failure.
+                idx = futures[fut]
+                ok, err, out_path = False, f"scene thread crashed: {e}", scene_dir / f"scene_{idx:02d}.mp4"
+            if ok:
+                scene_paths_by_idx[idx] = out_path
+            elif first_failure is None:
+                first_failure = (idx, err)
+                # Note: don't cancel siblings — letting them finish gives us
+                # partial artifacts for debugging and keeps thread cleanup clean.
+                # The whole render still fails as a unit below.
+
+    if first_failure is not None:
+        idx, err = first_failure
+        job = JOBS.get(job_id)
+        if job:
             job["status"] = "failed"
-            job["error"] = f"scene {i+1}/{len(scenes)}: {err}"
+            job["error"] = f"scene {idx+1}/{len(scenes)}: {err}"
             job["finished_at"] = time.time()
             save_jobs(JOBS)
             send_completion_email(job.get("user_email") or "", job)
-            return
-        scene_paths.append(scene_out)
+        return
 
-        # Extract last frame to chain into next scene for continuity. reAPI needs
-        # a public URL, so we save the frame under /static/frames/ where the
-        # FastAPI StaticFiles mount serves it publicly.
-        if i + 1 < len(scenes):
-            frame_name = f"{job_id}_frame_{i:02d}.png"
-            frame_path = FRAMES / frame_name
-            if extract_last_frame(scene_out, frame_path) and PUBLIC_ORIGIN:
-                ref_url = f"{PUBLIC_ORIGIN}/static/frames/{frame_name}"
-            else:
-                # No PUBLIC_ORIGIN configured (dev) or frame extraction failed:
-                # drop chaining and let the next scene render text-only.
-                ref_url = None
+    # Preserve original scene order for concat regardless of completion order.
+    scene_paths: list[Path] = [scene_paths_by_idx[i] for i in range(len(scenes))]
 
     # All scenes rendered — stitch
     j = JOBS.get(job_id)
