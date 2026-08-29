@@ -713,6 +713,21 @@ body::before {
   color: var(--ember);
   font-weight: 600;
 }
+.tile-active-charbible {
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  line-height: 1.4;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.06);
+  color: rgba(255,255,255,0.55);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: help;
+}
 .tile-active-scenes {
   display: flex;
   flex-direction: column;

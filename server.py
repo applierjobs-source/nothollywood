@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from auth import require_user, get_user
+from prompt_expander import expand_prompt
 
 # Provider: reAPI (unmoderated MiniMax H3 host).
 # Migrated from MiniMax direct on 2026-08-28. reAPI proxies to the same underlying H3
@@ -689,6 +690,35 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
     _job0 = JOBS.get(job_id)
     if _job0 is not None:
         _job0["scenes_state"] = _scenes_state_seed
+        _job0["expansion_status"] = "expanding"
+        save_jobs(JOBS)
+
+    # ==== Character-aware prompt expansion ====
+    # Before rendering, run the raw user prompt through an LLM pass that:
+    #   - Identifies named characters (Cartman, Peter Griffin, Homer, etc.)
+    #   - Writes a shared character bible + style guide
+    #   - Produces one expanded prompt per scene, each self-contained with
+    #     the style + character descriptions embedded inline
+    # Falls back to the raw-prompt path if ANTHROPIC_API_KEY is unset or the
+    # call fails; the render still works, just with lower character fidelity.
+    expansion = expand_prompt(prompt, scenes)
+    scene_prompts_expanded: list[str] = expansion["scenes"]
+    _jobx = JOBS.get(job_id)
+    if _jobx is not None:
+        _jobx["expansion_status"] = "expanded" if expansion["ok"] else "fallback"
+        _jobx["expansion_provider"] = expansion["provider"]
+        _jobx["expansion_latency_ms"] = expansion["latency_ms"]
+        if expansion.get("error"):
+            _jobx["expansion_error"] = expansion["error"]
+        # Store the character bible so the UI (later) can surface it and so
+        # debug endpoints show what the model actually saw.
+        if expansion.get("style"):
+            _jobx["expansion_style"] = expansion["style"]
+        if expansion.get("characters"):
+            _jobx["expansion_characters"] = expansion["characters"]
+        if expansion.get("notes"):
+            _jobx["expansion_notes"] = expansion["notes"]
+        _jobx["expansion_scene_prompts"] = scene_prompts_expanded
         save_jobs(JOBS)
 
     def _publish_agg_status():
@@ -742,13 +772,19 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
     def _render_scene(idx: int, dur: int) -> tuple[int, bool, str, Path]:
         """Render one scene in its own thread. Returns (idx, ok, err, out_path)."""
         scene_out = scene_dir / f"scene_{idx:02d}.mp4"
-        scene_prompt = prompt
-        if len(scenes) > 1:
-            scene_prompt = (
-                f"Scene {idx+1} of {len(scenes)} in a continuous story. "
-                f"Maintain the exact same characters, wardrobe, setting, and visual style throughout. "
-                f"{prompt}"
-            )
+        # Prefer the LLM-expanded per-scene prompt when available (style +
+        # character bible embedded inline). Fall back to the raw prompt if
+        # expansion produced fewer entries than expected — defensive.
+        if idx < len(scene_prompts_expanded) and scene_prompts_expanded[idx]:
+            scene_prompt = scene_prompts_expanded[idx]
+        else:
+            scene_prompt = prompt
+            if len(scenes) > 1:
+                scene_prompt = (
+                    f"Scene {idx+1} of {len(scenes)} in a continuous story. "
+                    f"Maintain the exact same characters, wardrobe, setting, and visual style throughout. "
+                    f"{prompt}"
+                )
 
         def _on_status(status: str):
             prev = scene_states.get(idx)

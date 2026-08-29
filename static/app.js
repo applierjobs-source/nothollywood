@@ -684,9 +684,18 @@ function renderTile(job) {
     })();
 
     // Header counter
-    const headerCounter = total > 1
-      ? `${done} of ${total} scenes complete · ${running} rendering${failed ? ` · ${failed} failed` : ""}`
-      : (job.scene_status === "running" ? "Rendering…" : "Preparing…");
+    const isExpanding = job.expansion_status === "expanding";
+    const headerCounter = isExpanding
+      ? `Casting characters and writing scene descriptions…`
+      : (total > 1
+        ? `${done} of ${total} scenes complete · ${running} rendering${failed ? ` · ${failed} failed` : ""}`
+        : (job.scene_status === "running" ? "Rendering…" : "Preparing…"));
+
+    // Small chip surfacing the character bible if we have one — answers
+    // the question 'is the model actually going to know what Cartman looks like'
+    const charChip = job.expansion_characters
+      ? `<div class="tile-active-charbible" title="${escapeHtml(job.expansion_characters)}">🎭 ${escapeHtml(job.expansion_characters.slice(0, 90))}${job.expansion_characters.length > 90 ? "…" : ""}</div>`
+      : "";
 
     // Per-scene rows. For single-scene renders we skip the list — no value.
     const sceneRows = (total > 1 && scenesState.length)
@@ -699,8 +708,9 @@ function renderTile(job) {
         <div class="tile-active-body">
           <div class="tile-active-header">
             <div class="tile-active-prompt">${escapeHtml(firstLine(job.prompt))}</div>
-            <div class="tile-active-scene">${escapeHtml(headerCounter)} · <span class="tile-active-eta">${escapeHtml(etaHeader)}</span></div>
+            <div class="tile-active-scene">${escapeHtml(headerCounter)}${isExpanding ? "" : ` · <span class="tile-active-eta">${escapeHtml(etaHeader)}</span>`}</div>
           </div>
+          ${charChip}
           ${sceneRows ? `<div class="tile-active-scenes">${sceneRows}</div>` : ""}
           <div class="tile-active-progress">
             <div class="tile-active-progress-fill" style="width:${finalPct}%"></div>
