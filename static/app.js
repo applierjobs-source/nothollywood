@@ -1059,12 +1059,34 @@ el.authForm.addEventListener("submit", async (e) => {
       resp = await sb.auth.signUp({ email, password });
       if (resp.error) throw resp.error;
       if (resp.data && resp.data.user && !resp.data.session) {
+        // No session on signup means Supabase is set to Confirm Email (server
+        // side). Attempt the fallback signin — it will fail with
+        // "email_not_confirmed", which we translate into an actionable message.
         const signIn = await sb.auth.signInWithPassword({ email, password });
-        if (signIn.error) throw signIn.error;
+        if (signIn.error) {
+          const msg = (signIn.error.message || "").toLowerCase();
+          if (msg.includes("not confirmed") || msg.includes("confirm")) {
+            throw new Error(
+              "Account created. We're still enabling instant signin — " +
+              "please try signing in again in a minute, or check your email " +
+              "for a confirmation link."
+            );
+          }
+          throw signIn.error;
+        }
       }
     } else {
       resp = await sb.auth.signInWithPassword({ email, password });
-      if (resp.error) throw resp.error;
+      if (resp.error) {
+        const msg = (resp.error.message || "").toLowerCase();
+        if (msg.includes("not confirmed") || msg.includes("confirm")) {
+          throw new Error(
+            "Please check your email for a confirmation link, or contact " +
+            "support@nothollywood.ai if you already confirmed."
+          );
+        }
+        throw resp.error;
+      }
     }
     closeModal(el.authModal);
     el.authForm.reset();
