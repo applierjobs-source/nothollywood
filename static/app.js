@@ -93,7 +93,12 @@ let currentDetailJob = null;
 // ─── Auth (Supabase) ───────────────────────────────────────────────
 // The Supabase client is created after we fetch /api/config on init. Until then
 // auth is disabled and the app behaves as an anonymous read-only browse.
-let supabase = null;
+// NOTE: renamed from `supabase` to `sb` — the CDN's @supabase/supabase-js UMD
+// bundle sets `window.supabase` as the SDK factory, and declaring `let supabase`
+// at the top level of a classic <script> collides with that global in some
+// browsers, throwing 'Identifier supabase has already been declared' and
+// killing the entire script.
+let sb = null;
 let currentUser = null;     // null when signed out; { id, email, ... } when signed in
 let authRequired = false;   // true when backend reports auth is configured
 let authMode = "signin";    // "signin" | "signup"
@@ -109,16 +114,16 @@ async function initAuth() {
       return;
     }
     // eslint-disable-next-line no-undef
-    supabase = window.supabase.createClient(cfg.supabase_url, cfg.supabase_anon_key, {
+    sb = window.supabase.createClient(cfg.supabase_url, cfg.supabase_anon_key, {
       auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
     });
     // Restore session from localStorage if present.
-    const { data: sessData } = await supabase.auth.getSession();
+    const { data: sessData } = await sb.auth.getSession();
     if (sessData && sessData.session) {
       currentUser = sessData.session.user;
     }
     // Subscribe to changes (sign-in, sign-out, token refresh).
-    supabase.auth.onAuthStateChange((_event, session) => {
+    sb.auth.onAuthStateChange((_event, session) => {
       currentUser = session ? session.user : null;
       renderAuthUI();
       refreshJobs();
@@ -129,8 +134,8 @@ async function initAuth() {
 }
 
 async function currentAccessToken() {
-  if (!supabase) return null;
-  const { data } = await supabase.auth.getSession();
+  if (!sb) return null;
+  const { data } = await sb.auth.getSession();
   return data && data.session ? data.session.access_token : null;
 }
 
@@ -919,8 +924,8 @@ function setAuthMode(mode) {
 
 el.navSignInBtn.addEventListener("click", () => openAuthModal("signin"));
 el.navSignOutBtn.addEventListener("click", async () => {
-  if (!supabase) return;
-  await supabase.auth.signOut();
+  if (!sb) return;
+  await sb.auth.signOut();
 });
 
 document.addEventListener("click", (e) => {
@@ -939,7 +944,7 @@ document.addEventListener("click", (e) => {
 
 el.authForm.addEventListener("submit", async (e) => {
   e.preventDefault();
-  if (!supabase) return;
+  if (!sb) return;
   el.authError.hidden = true;
   el.authError.textContent = "";
   el.authError.style.color = "";
@@ -954,7 +959,7 @@ el.authForm.addEventListener("submit", async (e) => {
   try {
     let resp;
     if (authMode === "signup") {
-      resp = await supabase.auth.signUp({ email, password });
+      resp = await sb.auth.signUp({ email, password });
       if (resp.error) throw resp.error;
       if (resp.data && resp.data.user && !resp.data.session) {
         el.authError.hidden = false;
@@ -964,7 +969,7 @@ el.authForm.addEventListener("submit", async (e) => {
         return;
       }
     } else {
-      resp = await supabase.auth.signInWithPassword({ email, password });
+      resp = await sb.auth.signInWithPassword({ email, password });
       if (resp.error) throw resp.error;
     }
     closeModal(el.authModal);

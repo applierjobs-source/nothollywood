@@ -1081,7 +1081,17 @@ def index():
 # Also serve the frontend assets at the root so that when deploy_website
 # rehosts the /static/ folder at site root the same relative paths work in
 # local dev too. Only whitelisted top-level filenames pass through.
-_ROOT_ASSETS = {"styles.css", "app.js"}
+_ROOT_ASSETS = {
+    "styles.css",
+    "app.js",
+    "pricing.html",
+    "pricing.css",
+    "pricing.js",
+    "terms.html",
+    "privacy.html",
+    "refunds.html",
+    "legal.css",
+}
 
 
 @app.get("/{fname}")

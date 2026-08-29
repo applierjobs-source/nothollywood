@@ -16,7 +16,7 @@ const PACKS = [
 ];
 
 // ─── Auth widgets ──────────────────────────────────────────────────
-let supabase = null;
+let sb = null;
 let currentUser = null;
 let authRequired = false;
 
@@ -28,12 +28,12 @@ async function initAuth() {
     authRequired = !!cfg.auth_required;
     if (!authRequired || !cfg.supabase_url || !cfg.supabase_anon_key) return;
     // eslint-disable-next-line no-undef
-    supabase = window.supabase.createClient(cfg.supabase_url, cfg.supabase_anon_key, {
+    sb = window.supabase.createClient(cfg.supabase_url, cfg.supabase_anon_key, {
       auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
     });
-    const { data: sessData } = await supabase.auth.getSession();
+    const { data: sessData } = await sb.auth.getSession();
     if (sessData?.session) currentUser = sessData.session.user;
-    supabase.auth.onAuthStateChange((_e, session) => {
+    sb.auth.onAuthStateChange((_e, session) => {
       currentUser = session ? session.user : null;
       renderAuthUI();
     });
@@ -65,7 +65,7 @@ $("#navSignInBtn").addEventListener("click", () => {
   window.location.href = "/?auth=1";
 });
 $("#navSignOutBtn").addEventListener("click", async () => {
-  if (supabase) await supabase.auth.signOut();
+  if (sb) await sb.auth.signOut();
 });
 
 // ─── Cost calculator ───────────────────────────────────────────────
@@ -145,8 +145,8 @@ $$("[data-checkout]").forEach((btn) => {
     try {
       // Attach Supabase JWT so the backend can associate the purchase with the user
       const headers = { "Content-Type": "application/json" };
-      if (supabase) {
-        const { data } = await supabase.auth.getSession();
+      if (sb) {
+        const { data } = await sb.auth.getSession();
         if (data?.session?.access_token) {
           headers["Authorization"] = `Bearer ${data.session.access_token}`;
         }
