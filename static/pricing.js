@@ -1,12 +1,20 @@
 // ═══════════════════════════════════════════════════════════════════════
-// Pricing page — auth chip + billing toggle + checkout stubs
+// Pricing page — credit packs + cost calculator
 // Stripe integration comes in the next phase.
 // ═════════════════════════════════════════════════════════════════════════
 
 const API = window.location.origin;
 const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => document.querySelectorAll(sel);
 
-// ─── Auth widgets (reuse the same pattern as app.js) ───────────────
+// ─── Pack config (must stay in sync with pricing.html) ─────────────
+const PACKS = [
+  { id: "taster",  name: "Taster",  price: 5,  credits: 20 },
+  { id: "starter", name: "Starter", price: 15, credits: 75 },
+  { id: "studio",  name: "Studio",  price: 75, credits: 500 },
+];
+
+// ─── Auth widgets ──────────────────────────────────────────────────
 let supabase = null;
 let currentUser = null;
 let authRequired = false;
@@ -53,44 +61,80 @@ function renderAuthUI() {
 }
 
 $("#navSignInBtn").addEventListener("click", () => {
-  // Bounce to homepage where the auth modal lives
   window.location.href = "/?auth=1";
 });
 $("#navSignOutBtn").addEventListener("click", async () => {
   if (supabase) await supabase.auth.signOut();
 });
 
-// ─── Billing toggle ────────────────────────────────────────────────
-const btOpts = document.querySelectorAll(".bt-opt");
-btOpts.forEach((opt) => {
+// ─── Cost calculator ───────────────────────────────────────────────
+const calcDuration = $("#calcDuration");
+const calcDurationDisplay = $("#calcDurationDisplay");
+const calcCredits = $("#calcCredits");
+const calcPack = $("#calcPack");
+const calcTotal = $("#calcTotal");
+let calcResolution = "768"; // "768" | "2k"
+
+function updateCalculator() {
+  const seconds = parseInt(calcDuration.value, 10);
+  const creditsPerSec = calcResolution === "2k" ? 2 : 1;
+  const creditsNeeded = seconds * creditsPerSec;
+
+  // Format duration display
+  if (seconds < 60) {
+    calcDurationDisplay.textContent = `${seconds}`;
+  } else {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    calcDurationDisplay.textContent = s === 0 ? `${m * 60}` : `${seconds}`;
+  }
+
+  calcCredits.textContent = creditsNeeded.toLocaleString();
+
+  // Recommend the smallest pack that covers the need
+  const recommended = recommendPack(creditsNeeded);
+  calcPack.textContent = recommended.pack.name;
+  calcTotal.textContent = `$${recommended.totalCost}`;
+}
+
+function recommendPack(creditsNeeded) {
+  // Try single pack first
+  for (const p of PACKS) {
+    if (p.credits >= creditsNeeded) {
+      return { pack: p, totalCost: p.price };
+    }
+  }
+  // Need multiple Studio packs
+  const studio = PACKS[PACKS.length - 1];
+  const count = Math.ceil(creditsNeeded / studio.credits);
+  return {
+    pack: { name: `${count}× Studio` },
+    totalCost: studio.price * count,
+  };
+}
+
+calcDuration.addEventListener("input", updateCalculator);
+$$(".calc-opt").forEach((opt) => {
   opt.addEventListener("click", () => {
-    btOpts.forEach((o) => {
-      o.classList.toggle("active", o === opt);
-      o.setAttribute("aria-checked", o === opt ? "true" : "false");
-    });
-    const period = opt.dataset.billing; // "monthly" | "annual"
-    document.querySelectorAll(".price-amount[data-monthly]").forEach((el) => {
-      el.textContent = period === "annual" ? el.dataset.annual : el.dataset.monthly;
-    });
-    document.querySelectorAll(".price-period").forEach((el) => {
-      el.textContent = period === "annual" ? "/month, billed yearly" : "/month";
-    });
+    $$(".calc-opt").forEach((o) => o.classList.toggle("active", o === opt));
+    calcResolution = opt.dataset.res;
+    updateCalculator();
   });
 });
+updateCalculator();
 
-// ─── Checkout CTAs (stub — real Stripe wiring in next phase) ───────
-document.querySelectorAll("[data-checkout]").forEach((btn) => {
+// ─── Pack checkout CTAs (stub — real Stripe wiring next phase) ─────
+$$("[data-checkout]").forEach((btn) => {
   btn.addEventListener("click", async (e) => {
     e.preventDefault();
-    const tier = btn.dataset.checkout;
+    const pack = btn.dataset.checkout;
+    const price = btn.dataset.price;
     if (authRequired && !currentUser) {
-      // Bounce to homepage for sign-in, then come back to pricing
-      window.location.href = `/?auth=1&next=/pricing.html&tier=${tier}`;
+      window.location.href = `/?auth=1&next=/pricing.html&pack=${pack}`;
       return;
     }
-    // TODO: POST /api/checkout/create-session with { tier, billing }
     alert(
-      `Stripe checkout for the "${tier}" tier is being wired up. ` +
+      `Stripe checkout for the "${pack}" pack ($${price}) is being wired up. ` +
       "You'll be redirected to a Stripe-hosted payment page here in the next update."
     );
   });

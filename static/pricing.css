@@ -410,3 +410,239 @@
   background: linear-gradient(90deg, #c8b8ff, #6dd5e8);
   border-radius: 2px;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   CREDIT PACK ADDITIONS
+   ═════════════════════════════════════════════════════════════════════════ */
+
+/* Explainer chips under hero */
+.explainer-row {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-top: 40px;
+}
+.explainer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 18px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  font-family: var(--f-mono);
+  font-size: 13px;
+  color: var(--text-mid);
+}
+.chip-num {
+  font-size: 18px;
+  font-weight: 600;
+  background: linear-gradient(135deg, #c8b8ff, #6dd5e8);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.chip-label { color: var(--text); }
+
+/* Credit badge inside each pack card */
+.credit-badge {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 14px 18px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  margin-bottom: 22px;
+}
+.credit-badge-hero {
+  background: linear-gradient(135deg, rgba(200, 184, 255, 0.15), rgba(109, 213, 232, 0.08));
+  border: 1px solid rgba(200, 184, 255, 0.25);
+}
+.cb-num {
+  font-size: 32px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  line-height: 1;
+}
+.credit-badge-hero .cb-num {
+  background: linear-gradient(135deg, #c8b8ff, #6dd5e8);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.cb-label {
+  font-size: 13px;
+  color: var(--text-mid);
+  font-family: var(--f-mono);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+/* Value line — subtle highlight for effective price/min */
+.tier-features .feat-value {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: rgba(120, 220, 150, 0.06);
+  border-left: 2px solid rgba(155, 231, 160, 0.5);
+  border-radius: 6px;
+  font-size: 13px;
+  color: #9be7a0;
+  font-family: var(--f-mono);
+  letter-spacing: 0.02em;
+}
+.tier-features .feat-value::before { content: none; }
+
+/* Price period tweak — "one-time" is longer than "/month" */
+.tier-price .price-period {
+  font-size: 13px;
+  color: var(--text-dim);
+  font-family: var(--f-mono);
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   COST CALCULATOR
+   ═════════════════════════════════════════════════════════════════════════ */
+.calc-section {
+  margin: 100px 0;
+  padding: 48px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, rgba(255, 255, 255, 0.02) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 24px;
+}
+@media (max-width: 700px) {
+  .calc-section { padding: 28px 20px; }
+}
+.calc-head { text-align: center; margin-bottom: 40px; }
+.calc-eyebrow {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin: 0 0 8px;
+}
+.calc-title {
+  font-size: clamp(24px, 3.5vw, 36px);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin: 0;
+  color: var(--text);
+}
+.calc-body {
+  display: grid;
+  grid-template-columns: 1.5fr 1fr;
+  gap: 40px;
+  align-items: center;
+}
+@media (max-width: 800px) { .calc-body { grid-template-columns: 1fr; gap: 32px; } }
+
+.calc-controls { display: flex; flex-direction: column; gap: 28px; }
+.calc-field { display: flex; flex-direction: column; gap: 12px; }
+.calc-label {
+  font-size: 14px;
+  color: var(--text);
+  font-weight: 500;
+}
+.calc-label span { color: var(--text); font-weight: 600; }
+
+.calc-slider {
+  width: 100%;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  outline: none;
+}
+.calc-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  background: linear-gradient(135deg, #c8b8ff, #6dd5e8);
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: 0 0 0 4px rgba(200, 184, 255, 0.15);
+}
+.calc-slider::-moz-range-thumb {
+  width: 22px;
+  height: 22px;
+  background: linear-gradient(135deg, #c8b8ff, #6dd5e8);
+  border-radius: 50%;
+  cursor: pointer;
+  border: none;
+}
+.calc-scale {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--f-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 0 4px;
+}
+
+.calc-toggle {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  width: fit-content;
+}
+.calc-opt {
+  padding: 8px 20px;
+  background: transparent;
+  border: none;
+  color: var(--text-mid);
+  font-family: var(--f-mono);
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background var(--e-fast), color var(--e-fast);
+}
+.calc-opt:hover { color: var(--text); }
+.calc-opt.active {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text);
+}
+
+.calc-result {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 32px 24px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+}
+.calc-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.calc-stat-label {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.calc-stat-value {
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+.calc-stat-accent {
+  background: linear-gradient(135deg, #c8b8ff, #6dd5e8);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}

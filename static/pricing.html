@@ -36,112 +36,179 @@
     <main class="pricing-main">
       <!-- Hero -->
       <header class="pricing-hero">
-        <p class="pricing-eyebrow">Pricing · Cancel anytime</p>
+        <p class="pricing-eyebrow">Prepaid credits · Never expire</p>
         <h1 class="pricing-title">
-          Make the show <br />
-          <span class="pricing-title-accent">Hollywood won't.</span>
+          Buy credits. <br />
+          <span class="pricing-title-accent">Make the show.</span>
         </h1>
         <p class="pricing-sub">
-          Every plan uses the same uncensored engine. Pay for the minutes you actually render.
+          One credit renders one second of 768P video with native audio.
+          No subscription, no surprises — spend when you're inspired.
         </p>
 
-        <!-- Billing toggle -->
-        <div class="billing-toggle" role="radiogroup" aria-label="Billing period">
-          <button type="button" class="bt-opt active" data-billing="monthly" role="radio" aria-checked="true">Monthly</button>
-          <button type="button" class="bt-opt" data-billing="annual" role="radio" aria-checked="false">
-            Annual <span class="bt-save">Save 20%</span>
-          </button>
+        <!-- Simple explainer chips -->
+        <div class="explainer-row">
+          <div class="explainer-chip">
+            <span class="chip-num">1</span>
+            <span class="chip-label">credit = 1 second @ 768P</span>
+          </div>
+          <div class="explainer-chip">
+            <span class="chip-num">2</span>
+            <span class="chip-label">credits = 1 second @ 2K</span>
+          </div>
+          <div class="explainer-chip">
+            <span class="chip-num">∞</span>
+            <span class="chip-label">Credits never expire</span>
+          </div>
         </div>
       </header>
 
-      <!-- Tier cards -->
+      <!-- Pack cards -->
       <section class="tier-grid">
-        <!-- FREE -->
+        <!-- TASTER -->
         <article class="tier-card">
           <div class="tier-head">
-            <h2 class="tier-name">Free</h2>
-            <p class="tier-tag">Try the studio</p>
+            <h2 class="tier-name">Taster</h2>
+            <p class="tier-tag">Try it out</p>
           </div>
           <div class="tier-price">
-            <span class="price-amount">$0</span>
-            <span class="price-period">/month</span>
+            <span class="price-amount">$5</span>
+            <span class="price-period">one-time</span>
+          </div>
+          <div class="credit-badge">
+            <span class="cb-num">20</span>
+            <span class="cb-label">credits</span>
           </div>
           <ul class="tier-features">
-            <li><span class="feat-check">✓</span> <b>30 seconds</b> of render/month</li>
-            <li><span class="feat-check">✓</span> 768P quality</li>
-            <li><span class="feat-check">✓</span> Up to 3 scenes per show</li>
-            <li><span class="feat-check">✓</span> Watermark on all exports</li>
-            <li class="feat-muted"><span class="feat-dash">—</span> Standard queue</li>
+            <li><span class="feat-check">✓</span> <b>20 seconds</b> of 768P video</li>
+            <li><span class="feat-check">✓</span> Or ~10 seconds at 2K</li>
+            <li><span class="feat-check">✓</span> Native audio + voice</li>
+            <li><span class="feat-check">✓</span> Watermarked exports</li>
+            <li><span class="feat-check">✓</span> Credits never expire</li>
           </ul>
-          <a href="/" class="tier-cta tier-cta-outline">Start free</a>
-          <p class="tier-fine">No card required</p>
+          <a href="#" data-checkout="taster" data-price="5" class="tier-cta tier-cta-outline">Buy Taster</a>
+          <p class="tier-fine">Best for a single test run</p>
         </article>
 
-        <!-- PRO (featured) -->
+        <!-- STARTER (featured) -->
         <article class="tier-card tier-featured">
           <div class="tier-badge">Most popular</div>
           <div class="tier-head">
-            <h2 class="tier-name">Pro</h2>
-            <p class="tier-tag">For serious creators</p>
+            <h2 class="tier-name">Starter</h2>
+            <p class="tier-tag">A whole show</p>
           </div>
           <div class="tier-price">
-            <span class="price-amount" data-monthly="$29" data-annual="$23">$29</span>
-            <span class="price-period">/month</span>
+            <span class="price-amount">$15</span>
+            <span class="price-period">one-time</span>
+          </div>
+          <div class="credit-badge credit-badge-hero">
+            <span class="cb-num">75</span>
+            <span class="cb-label">credits</span>
           </div>
           <ul class="tier-features">
-            <li><span class="feat-check">✓</span> <b>10 minutes</b> of render/month</li>
-            <li><span class="feat-check">✓</span> 768P quality</li>
-            <li><span class="feat-check">✓</span> <b>Unlimited</b> scenes per show</li>
-            <li><span class="feat-check">✓</span> Voice cloning (ElevenLabs)</li>
-            <li><span class="feat-check">✓</span> Priority queue</li>
-            <li class="feat-muted"><span class="feat-dash">—</span> Watermarked</li>
-            <li class="feat-overage">Overage: <b>$4/min</b></li>
+            <li><span class="feat-check">✓</span> <b>1 min 15 sec</b> of 768P video</li>
+            <li><span class="feat-check">✓</span> Or ~37 seconds at 2K</li>
+            <li><span class="feat-check">✓</span> Native audio + voice</li>
+            <li><span class="feat-check">✓</span> Multi-scene shows</li>
+            <li><span class="feat-check">✓</span> Watermarked exports</li>
+            <li><span class="feat-check">✓</span> Credits never expire</li>
+            <li class="feat-value">$12 per minute effective</li>
           </ul>
-          <a href="#" data-checkout="pro" class="tier-cta tier-cta-solid">
-            <span>Upgrade to Pro</span>
+          <a href="#" data-checkout="starter" data-price="15" class="tier-cta tier-cta-solid">
+            <span>Buy Starter</span>
             <span class="cta-arrow">→</span>
           </a>
-          <p class="tier-fine">Cancel anytime · Prorated</p>
+          <p class="tier-fine">Best for a full pilot episode</p>
         </article>
 
         <!-- STUDIO -->
         <article class="tier-card">
           <div class="tier-head">
             <h2 class="tier-name">Studio</h2>
-            <p class="tier-tag">For production teams</p>
+            <p class="tier-tag">Serious production</p>
           </div>
           <div class="tier-price">
-            <span class="price-amount" data-monthly="$99" data-annual="$79">$99</span>
-            <span class="price-period">/month</span>
+            <span class="price-amount">$75</span>
+            <span class="price-period">one-time</span>
+          </div>
+          <div class="credit-badge">
+            <span class="cb-num">500</span>
+            <span class="cb-label">credits</span>
           </div>
           <ul class="tier-features">
-            <li><span class="feat-check">✓</span> <b>40 minutes</b> of render/month</li>
-            <li><span class="feat-check">✓</span> 1080P (when available)</li>
-            <li><span class="feat-check">✓</span> Unlimited scenes per show</li>
-            <li><span class="feat-check">✓</span> Voice cloning + custom voices</li>
+            <li><span class="feat-check">✓</span> <b>8 min 20 sec</b> of 768P video</li>
+            <li><span class="feat-check">✓</span> Or ~4 min 10 sec at 2K</li>
+            <li><span class="feat-check">✓</span> Native audio + voice</li>
+            <li><span class="feat-check">✓</span> Multi-scene shows</li>
             <li><span class="feat-check">✓</span> <b>No watermark</b></li>
             <li><span class="feat-check">✓</span> Commercial license</li>
-            <li><span class="feat-check">✓</span> API access (beta)</li>
-            <li class="feat-overage">Overage: <b>$3/min</b></li>
+            <li><span class="feat-check">✓</span> Priority queue</li>
+            <li class="feat-value">$9 per minute effective — save 40%</li>
           </ul>
-          <a href="#" data-checkout="studio" class="tier-cta tier-cta-outline">Upgrade to Studio</a>
-          <p class="tier-fine">Includes remove-watermark permission</p>
+          <a href="#" data-checkout="studio" data-price="75" class="tier-cta tier-cta-outline">Buy Studio</a>
+          <p class="tier-fine">Best value per credit</p>
         </article>
       </section>
 
-      <!-- Comparison strip -->
+      <!-- Cost calculator -->
+      <section class="calc-section">
+        <div class="calc-head">
+          <p class="calc-eyebrow">Cost calculator</p>
+          <h2 class="calc-title">How much video do you actually need?</h2>
+        </div>
+        <div class="calc-body">
+          <div class="calc-controls">
+            <div class="calc-field">
+              <label class="calc-label" for="calcDuration">
+                Video length: <span id="calcDurationDisplay">60</span> seconds
+              </label>
+              <input type="range" id="calcDuration" min="5" max="500" step="5" value="60" class="calc-slider" />
+              <div class="calc-scale">
+                <span>5s</span>
+                <span>1min</span>
+                <span>3min</span>
+                <span>5min</span>
+                <span>8min</span>
+              </div>
+            </div>
+            <div class="calc-field">
+              <label class="calc-label">Resolution</label>
+              <div class="calc-toggle" role="radiogroup">
+                <button type="button" class="calc-opt active" data-res="768">768P</button>
+                <button type="button" class="calc-opt" data-res="2k">2K</button>
+              </div>
+            </div>
+          </div>
+          <div class="calc-result">
+            <div class="calc-stat">
+              <span class="calc-stat-label">Credits needed</span>
+              <span class="calc-stat-value" id="calcCredits">60</span>
+            </div>
+            <div class="calc-stat">
+              <span class="calc-stat-label">Recommended pack</span>
+              <span class="calc-stat-value calc-stat-accent" id="calcPack">Starter</span>
+            </div>
+            <div class="calc-stat">
+              <span class="calc-stat-label">Total cost</span>
+              <span class="calc-stat-value" id="calcTotal">$15</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Trust strip -->
       <section class="pricing-strip">
         <div class="strip-item">
-          <div class="strip-num">4K</div>
-          <div class="strip-label">In beta on Studio</div>
+          <div class="strip-num">$0.074</div>
+          <div class="strip-label">Our cost per second</div>
         </div>
         <div class="strip-item">
           <div class="strip-num">0</div>
           <div class="strip-label">Content filters, ever</div>
         </div>
         <div class="strip-item">
-          <div class="strip-num">2K</div>
-          <div class="strip-label">Native resolution</div>
+          <div class="strip-num">100%</div>
+          <div class="strip-label">Refund on failed renders</div>
         </div>
         <div class="strip-item">
           <div class="strip-num">24/7</div>
@@ -154,28 +221,32 @@
         <h2 class="faq-title">Common questions</h2>
         <div class="faq-list">
           <details class="faq-item">
-            <summary>What counts as a "minute" of render time?</summary>
-            <p>The total duration of finished video you export. A 6-second scene counts as 6 seconds. A 45-second stitched multi-scene show counts as 45 seconds. Failed renders don't count.</p>
+            <summary>How does the credit system work?</summary>
+            <p>Buy a pack once, credits go into your account, credits never expire. When you render a video, credits are deducted based on the finished length: 1 credit per second at 768P, 2 credits per second at 2K. You see the credit cost before you confirm each render.</p>
           </details>
           <details class="faq-item">
-            <summary>Is there really no content filter?</summary>
-            <p>Correct. We run our video model with content_filter set to false. You're responsible for what you make. We don't generate CSAM or content depicting real people without consent — the model refuses those. Everything else is on you.</p>
+            <summary>What if a render fails?</summary>
+            <p>Failed renders are refunded automatically. Credits go straight back into your balance. You never pay for something that didn't work.</p>
           </details>
           <details class="faq-item">
-            <summary>Can I remove the watermark on the Pro plan?</summary>
-            <p>No — watermark removal is a Studio-tier feature and is part of the commercial license. It's how we track which clips are attributable to paying commercial users.</p>
+            <summary>Can I get a refund on unused credits?</summary>
+            <p>Yes. Email zach@nothollywood.ai within 30 days of purchase and we'll refund your unused credit balance, prorated. Used credits are non-refundable.</p>
           </details>
           <details class="faq-item">
-            <summary>What happens if I go over my included minutes?</summary>
-            <p>You get charged the overage rate ($4/min on Pro, $3/min on Studio) at the end of the billing cycle. No hard stop — your renders keep going. You can set an overage cap in your account settings.</p>
+            <summary>What resolution do I get?</summary>
+            <p>Every render is native 768P from MiniMax H3 with built-in synchronized audio and voice. 2K is available on any pack at 2× credit cost per second. Native audio, sound effects, and lip-synced dialogue are included at no extra credit cost — the model generates everything in one pass.</p>
+          </details>
+          <details class="faq-item">
+            <summary>How do I remove the watermark?</summary>
+            <p>Studio pack purchases unlock watermark-free exports for the credits included in that pack and any credits you buy going forward while you have Studio access. It's how we track which clips are attributable to paying commercial users.</p>
           </details>
           <details class="faq-item">
             <summary>Do you store my videos?</summary>
-            <p>Videos are held in Railway memory only while your session is active. Download to keep them. This is a deliberate choice — cheaper, faster, and less of your content on our servers.</p>
+            <p>Videos are held in memory only during your active session. Download them right after they render or they may disappear when we redeploy. Deliberate choice — cheaper, faster, less of your content on our servers.</p>
           </details>
           <details class="faq-item">
-            <summary>What about refunds?</summary>
-            <p>Prorated refund within 7 days if you haven't used more than 10% of your monthly minute allowance. Email zach@nothollywood.ai.</p>
+            <summary>Is there really no content filter?</summary>
+            <p>Correct. We run MiniMax H3 with content_filter set to false. You're responsible for what you make. The model itself refuses to generate CSAM or non-consensual likenesses of real people. Everything else is on you.</p>
           </details>
         </div>
       </section>
