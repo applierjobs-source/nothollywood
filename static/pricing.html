@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Pricing — Not Hollywood</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#050607" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="pricing.css" />
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  </head>
+  <body class="pricing-body">
+    <!-- Top nav (matches homepage) -->
+    <nav id="nav" class="nav">
+      <div class="nav-inner">
+        <a href="/" class="wordmark">Not<span class="wordmark-accent">Hollywood</span></a>
+        <ul class="nav-tabs">
+          <li><a href="/">Studio</a></li>
+          <li><a href="/pricing.html" class="active">Pricing</a></li>
+        </ul>
+        <div class="nav-right">
+          <button class="btn-secondary nav-auth-btn" id="navSignInBtn" hidden>Sign in</button>
+          <div class="nav-user" id="navUser" hidden>
+            <span class="nav-user-email" id="navUserEmail"></span>
+            <button class="btn-secondary nav-signout" id="navSignOutBtn">Sign out</button>
+          </div>
+          <a class="btn-primary" href="/">
+            <span class="btn-plus">+</span> Create a Show
+          </a>
+        </div>
+      </div>
+    </nav>
+
+    <main class="pricing-main">
+      <!-- Hero -->
+      <header class="pricing-hero">
+        <p class="pricing-eyebrow">Pricing · Cancel anytime</p>
+        <h1 class="pricing-title">
+          Make the show <br />
+          <span class="pricing-title-accent">Hollywood won't.</span>
+        </h1>
+        <p class="pricing-sub">
+          Every plan uses the same uncensored engine. Pay for the minutes you actually render.
+        </p>
+
+        <!-- Billing toggle -->
+        <div class="billing-toggle" role="radiogroup" aria-label="Billing period">
+          <button type="button" class="bt-opt active" data-billing="monthly" role="radio" aria-checked="true">Monthly</button>
+          <button type="button" class="bt-opt" data-billing="annual" role="radio" aria-checked="false">
+            Annual <span class="bt-save">Save 20%</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- Tier cards -->
+      <section class="tier-grid">
+        <!-- FREE -->
+        <article class="tier-card">
+          <div class="tier-head">
+            <h2 class="tier-name">Free</h2>
+            <p class="tier-tag">Try the studio</p>
+          </div>
+          <div class="tier-price">
+            <span class="price-amount">$0</span>
+            <span class="price-period">/month</span>
+          </div>
+          <ul class="tier-features">
+            <li><span class="feat-check">✓</span> <b>30 seconds</b> of render/month</li>
+            <li><span class="feat-check">✓</span> 768P quality</li>
+            <li><span class="feat-check">✓</span> Up to 3 scenes per show</li>
+            <li><span class="feat-check">✓</span> Watermark on all exports</li>
+            <li class="feat-muted"><span class="feat-dash">—</span> Standard queue</li>
+          </ul>
+          <a href="/" class="tier-cta tier-cta-outline">Start free</a>
+          <p class="tier-fine">No card required</p>
+        </article>
+
+        <!-- PRO (featured) -->
+        <article class="tier-card tier-featured">
+          <div class="tier-badge">Most popular</div>
+          <div class="tier-head">
+            <h2 class="tier-name">Pro</h2>
+            <p class="tier-tag">For serious creators</p>
+          </div>
+          <div class="tier-price">
+            <span class="price-amount" data-monthly="$29" data-annual="$23">$29</span>
+            <span class="price-period">/month</span>
+          </div>
+          <ul class="tier-features">
+            <li><span class="feat-check">✓</span> <b>10 minutes</b> of render/month</li>
+            <li><span class="feat-check">✓</span> 768P quality</li>
+            <li><span class="feat-check">✓</span> <b>Unlimited</b> scenes per show</li>
+            <li><span class="feat-check">✓</span> Voice cloning (ElevenLabs)</li>
+            <li><span class="feat-check">✓</span> Priority queue</li>
+            <li class="feat-muted"><span class="feat-dash">—</span> Watermarked</li>
+            <li class="feat-overage">Overage: <b>$4/min</b></li>
+          </ul>
+          <a href="#" data-checkout="pro" class="tier-cta tier-cta-solid">
+            <span>Upgrade to Pro</span>
+            <span class="cta-arrow">→</span>
+          </a>
+          <p class="tier-fine">Cancel anytime · Prorated</p>
+        </article>
+
+        <!-- STUDIO -->
+        <article class="tier-card">
+          <div class="tier-head">
+            <h2 class="tier-name">Studio</h2>
+            <p class="tier-tag">For production teams</p>
+          </div>
+          <div class="tier-price">
+            <span class="price-amount" data-monthly="$99" data-annual="$79">$99</span>
+            <span class="price-period">/month</span>
+          </div>
+          <ul class="tier-features">
+            <li><span class="feat-check">✓</span> <b>40 minutes</b> of render/month</li>
+            <li><span class="feat-check">✓</span> 1080P (when available)</li>
+            <li><span class="feat-check">✓</span> Unlimited scenes per show</li>
+            <li><span class="feat-check">✓</span> Voice cloning + custom voices</li>
+            <li><span class="feat-check">✓</span> <b>No watermark</b></li>
+            <li><span class="feat-check">✓</span> Commercial license</li>
+            <li><span class="feat-check">✓</span> API access (beta)</li>
+            <li class="feat-overage">Overage: <b>$3/min</b></li>
+          </ul>
+          <a href="#" data-checkout="studio" class="tier-cta tier-cta-outline">Upgrade to Studio</a>
+          <p class="tier-fine">Includes remove-watermark permission</p>
+        </article>
+      </section>
+
+      <!-- Comparison strip -->
+      <section class="pricing-strip">
+        <div class="strip-item">
+          <div class="strip-num">4K</div>
+          <div class="strip-label">In beta on Studio</div>
+        </div>
+        <div class="strip-item">
+          <div class="strip-num">0</div>
+          <div class="strip-label">Content filters, ever</div>
+        </div>
+        <div class="strip-item">
+          <div class="strip-num">2K</div>
+          <div class="strip-label">Native resolution</div>
+        </div>
+        <div class="strip-item">
+          <div class="strip-num">24/7</div>
+          <div class="strip-label">Render availability</div>
+        </div>
+      </section>
+
+      <!-- FAQ -->
+      <section class="faq">
+        <h2 class="faq-title">Common questions</h2>
+        <div class="faq-list">
+          <details class="faq-item">
+            <summary>What counts as a "minute" of render time?</summary>
+            <p>The total duration of finished video you export. A 6-second scene counts as 6 seconds. A 45-second stitched multi-scene show counts as 45 seconds. Failed renders don't count.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Is there really no content filter?</summary>
+            <p>Correct. We run our video model with content_filter set to false. You're responsible for what you make. We don't generate CSAM or content depicting real people without consent — the model refuses those. Everything else is on you.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Can I remove the watermark on the Pro plan?</summary>
+            <p>No — watermark removal is a Studio-tier feature and is part of the commercial license. It's how we track which clips are attributable to paying commercial users.</p>
+          </details>
+          <details class="faq-item">
+            <summary>What happens if I go over my included minutes?</summary>
+            <p>You get charged the overage rate ($4/min on Pro, $3/min on Studio) at the end of the billing cycle. No hard stop — your renders keep going. You can set an overage cap in your account settings.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Do you store my videos?</summary>
+            <p>Videos are held in Railway memory only while your session is active. Download to keep them. This is a deliberate choice — cheaper, faster, and less of your content on our servers.</p>
+          </details>
+          <details class="faq-item">
+            <summary>What about refunds?</summary>
+            <p>Prorated refund within 7 days if you haven't used more than 10% of your monthly minute allowance. Email zach@nothollywood.ai.</p>
+          </details>
+        </div>
+      </section>
+
+      <!-- Bottom CTA -->
+      <section class="bottom-cta">
+        <h2 class="bottom-cta-title">Ready to make something Hollywood won't?</h2>
+        <a href="/" class="btn-primary bottom-cta-btn">
+          <span class="btn-plus">+</span> Create a Show
+        </a>
+      </section>
+    </main>
+
+    <footer class="pricing-footer">
+      <div class="footer-inner">
+        <div class="footer-brand">
+          <span class="brand-mark">◱</span>
+          <span>Not Hollywood</span>
+        </div>
+        <p class="footer-copy">© 2026 Not Hollywood. Made in Austin, TX.</p>
+      </div>
+    </footer>
+
+    <script src="pricing.js"></script>
+  </body>
+</html>
