@@ -9,10 +9,10 @@ const $$ = (sel) => document.querySelectorAll(sel);
 
 // ─── Pack config (must stay in sync with pricing.html) ─────────────
 const PACKS = [
-  { id: "starter",     name: "Starter",     price: 15,  credits: 75,   available: true  },
-  { id: "studio",      name: "Studio",      price: 75,  credits: 500,  available: true  },
-  { id: "feature",     name: "Feature",     price: 250, credits: 1800, available: false },
-  { id: "blockbuster", name: "Blockbuster", price: 500, credits: 3600, available: false },
+  { id: "starter",     name: "Starter",     price: 15,  credits: 75   },
+  { id: "studio",      name: "Studio",      price: 75,  credits: 500  },
+  { id: "feature",     name: "Feature",     price: 250, credits: 1800 },
+  { id: "blockbuster", name: "Blockbuster", price: 500, credits: 3600 },
 ];
 
 // ─── Auth widgets ──────────────────────────────────────────────────
@@ -101,23 +101,17 @@ function updateCalculator() {
 }
 
 function recommendPack(creditsNeeded) {
-  // Prefer smallest single available pack that covers the need
+  // Prefer smallest single pack that covers the need
   for (const p of PACKS) {
-    if (p.available && p.credits >= creditsNeeded) {
+    if (p.credits >= creditsNeeded) {
       return { label: p.name, totalCost: p.price };
-    }
-  }
-  // Coming-soon single pack that covers the need — show with hint
-  for (const p of PACKS) {
-    if (!p.available && p.credits >= creditsNeeded) {
-      return { label: `${p.name} (coming soon)`, totalCost: p.price };
     }
   }
   // Beyond all packs — need multiple Blockbusters
   const biggest = PACKS[PACKS.length - 1];
   const count = Math.ceil(creditsNeeded / biggest.credits);
   return {
-    label: `${count}× ${biggest.name} (coming soon)`,
+    label: `${count}× ${biggest.name}`,
     totalCost: biggest.price * count,
   };
 }
@@ -137,37 +131,55 @@ $$("[data-checkout]").forEach((btn) => {
   btn.addEventListener("click", async (e) => {
     e.preventDefault();
     const pack = btn.dataset.checkout;
-    const price = btn.dataset.price;
-    const comingSoon = btn.dataset.comingSoon === "1";
+    const originalLabel = btn.textContent;
 
-    if (comingSoon) {
-      const email = prompt(
-        `The ${pack.charAt(0).toUpperCase() + pack.slice(1)} pack ($${price}) launches soon. ` +
-        `Drop your email and we'll notify you the day it opens:`
-      );
-      if (email && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim())) {
-        try {
-          await fetch(`${API}/api/notify-waitlist`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ pack, email: email.trim() }),
-          }).catch(() => {});
-        } catch (_) {}
-        alert(`Got it. We'll email ${email.trim()} when the ${pack} pack launches.`);
-      } else if (email !== null) {
-        alert("That didn't look like a valid email — try again from the button.");
-      }
-      return;
-    }
-
+    // Require sign-in if auth is enabled
     if (authRequired && !currentUser) {
       window.location.href = `/?auth=1&next=/pricing.html&pack=${pack}`;
       return;
     }
-    alert(
-      `Stripe checkout for the "${pack}" pack ($${price}) is being wired up. ` +
-      "You'll be redirected to a Stripe-hosted payment page here in the next update."
-    );
+
+    btn.textContent = "Opening checkout…";
+    btn.style.pointerEvents = "none";
+
+    try {
+      // Attach Supabase JWT so the backend can associate the purchase with the user
+      const headers = { "Content-Type": "application/json" };
+      if (supabase) {
+        const { data } = await supabase.auth.getSession();
+        if (data?.session?.access_token) {
+          headers["Authorization"] = `Bearer ${data.session.access_token}`;
+        }
+      }
+
+      const res = await fetch(`${API}/api/create-checkout-session`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          pack,
+          success_url: `${window.location.origin}/?checkout=success&pack=${pack}`,
+          cancel_url: `${window.location.origin}/pricing.html?checkout=cancelled`,
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `Checkout failed (${res.status})`);
+      }
+
+      const { url } = await res.json();
+      if (!url) throw new Error("No checkout URL returned");
+      window.location.href = url;
+    } catch (err) {
+      console.error("checkout error", err);
+      alert(
+        `Couldn't start checkout for the ${pack} pack.\n\n` +
+        `${err.message || err}\n\n` +
+        `Stripe may still be getting set up on this deployment. Try again in a few minutes.`
+      );
+      btn.textContent = originalLabel;
+      btn.style.pointerEvents = "";
+    }
   });
 });
 

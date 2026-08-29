@@ -68,6 +68,24 @@ GROK_API_KEY = (
 SITE_PASSWORD = os.environ.get("SITE_PASSWORD", "")
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
+
+# ────────────────────────────────────────────────────────────────────
+# Stripe checkout config. STRIPE_SECRET_KEY is the only required var;
+# the four STRIPE_PRICE_* env vars point at the recurring Stripe Price
+# IDs Zach creates in the Stripe dashboard for each credit pack.
+# ────────────────────────────────────────────────────────────────────
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_PRICE_STARTER = os.environ.get("STRIPE_PRICE_STARTER", "")
+STRIPE_PRICE_STUDIO = os.environ.get("STRIPE_PRICE_STUDIO", "")
+STRIPE_PRICE_FEATURE = os.environ.get("STRIPE_PRICE_FEATURE", "")
+STRIPE_PRICE_BLOCKBUSTER = os.environ.get("STRIPE_PRICE_BLOCKBUSTER", "")
+
+PACKS = {
+    "starter":     {"price_id": STRIPE_PRICE_STARTER,     "credits": 75,   "dollars": 15},
+    "studio":      {"price_id": STRIPE_PRICE_STUDIO,      "credits": 500,  "dollars": 75},
+    "feature":     {"price_id": STRIPE_PRICE_FEATURE,     "credits": 1800, "dollars": 250},
+    "blockbuster": {"price_id": STRIPE_PRICE_BLOCKBUSTER, "credits": 3600, "dollars": 500},
+}
 # ROOT is the directory this file lives in. Works in both dev and prod sandboxes.
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -584,6 +602,87 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
         j["status"] = "failed"
         j["error"] = f"finalize failed: {err}"
     save_jobs(JOBS)
+
+
+@app.post("/api/create-checkout-session")
+async def create_checkout_session(request: Request):
+    """Create a Stripe Checkout session for a credit pack.
+
+    Request body: {"pack": "starter"|"studio"|"feature"|"blockbuster",
+                   "success_url": str, "cancel_url": str}
+
+    Response: {"url": "https://checkout.stripe.com/..."} — the frontend
+    redirects the browser to this URL.
+
+    Requires STRIPE_SECRET_KEY plus a STRIPE_PRICE_<PACK> env var per pack.
+    If Supabase auth is enabled and the caller supplied a JWT, the user's
+    id/email are attached to the Stripe session's client_reference_id and
+    customer_email so we can credit them via webhook.
+    """
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="Stripe not configured on this deployment")
+
+    body = await request.json()
+    pack_id = (body.get("pack") or "").lower()
+    pack = PACKS.get(pack_id)
+    if not pack:
+        raise HTTPException(status_code=400, detail=f"Unknown pack: {pack_id}")
+    if not pack["price_id"]:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Stripe price ID for '{pack_id}' pack is not configured",
+        )
+
+    success_url = body.get("success_url") or f"{request.base_url}?checkout=success&pack={pack_id}"
+    cancel_url = body.get("cancel_url") or f"{request.base_url}pricing.html?checkout=cancelled"
+
+    # Optional Supabase JWT → user id/email for webhook attribution
+    user_id = ""
+    user_email = ""
+    try:
+        import auth as _auth  # local module
+        claims = _auth.get_user(request)
+        if claims:
+            user_id = claims.get("sub", "") or ""
+            user_email = claims.get("email", "") or ""
+    except Exception as e:
+        # Non-fatal — checkout can still proceed anonymously; webhook will just
+        # need to match by email or session_id later.
+        print(f"[stripe] JWT verify failed (proceeding anon): {e}")
+
+    # Build the Stripe API form payload (application/x-www-form-urlencoded)
+    form = {
+        "mode": "payment",
+        "line_items[0][price]": pack["price_id"],
+        "line_items[0][quantity]": "1",
+        "success_url": success_url + ("&" if "?" in success_url else "?") + "session_id={CHECKOUT_SESSION_ID}",
+        "cancel_url": cancel_url,
+        "metadata[pack]": pack_id,
+        "metadata[credits]": str(pack["credits"]),
+        "payment_intent_data[metadata][pack]": pack_id,
+        "payment_intent_data[metadata][credits]": str(pack["credits"]),
+    }
+    if user_id:
+        form["client_reference_id"] = user_id
+        form["metadata[user_id]"] = user_id
+        form["payment_intent_data[metadata][user_id]"] = user_id
+    if user_email:
+        form["customer_email"] = user_email
+
+    r = requests.post(
+        "https://api.stripe.com/v1/checkout/sessions",
+        auth=(STRIPE_SECRET_KEY, ""),
+        data=form,
+        timeout=15,
+    )
+    if not r.ok:
+        # Bubble Stripe's error message up so it's visible in the browser alert
+        err = r.json().get("error", {}).get("message", r.text) if r.text else f"HTTP {r.status_code}"
+        print(f"[stripe] checkout create failed: {err}")
+        raise HTTPException(status_code=502, detail=f"Stripe: {err}")
+
+    session = r.json()
+    return {"url": session["url"], "session_id": session["id"]}
 
 
 @app.get("/api/config")
