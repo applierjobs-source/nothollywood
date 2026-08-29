@@ -5,6 +5,9 @@
 
 const API = "";                                    // same-origin
 const POLL_MS = 3000;
+// When no active renders, keep a slow heartbeat poll so newly-finished renders
+// (email says done, but tab was throttled) show up when the user comes back.
+const IDLE_POLL_MS = 15000;
 
 // ─── Element cache ─────────────────────────────────────────────────
 const $ = (sel) => document.querySelector(sel);
@@ -1046,9 +1049,60 @@ async function refreshJobs() {
 }
 function schedulePoll() {
   if (pollTimer) clearTimeout(pollTimer);
+  // Always keep a heartbeat — fast when a render is active, slow when idle.
+  // Previously we killed the poll when no active jobs remained; if the tab
+  // was throttled at the moment a render finished, the tile stayed showing
+  // 'Scene 1 rendering' forever until the user navigated. Now we always poll.
   const hasActive = jobs.some((j) => j.status !== "done" && j.status !== "failed");
-  if (hasActive) {
-    pollTimer = setTimeout(refreshJobs, POLL_MS);
+  pollTimer = setTimeout(refreshJobs, hasActive ? POLL_MS : IDLE_POLL_MS);
+}
+
+// Tab focus / visibility handler: browsers throttle background timers,
+// so when the tab comes back to the foreground we force an immediate
+// refresh instead of waiting up to POLL_MS for the next scheduled tick.
+// This fixes: 'came back from another tab and the tile still says rendering
+// even though the email arrived'.
+function installVisibilityRefresh() {
+  const forceRefresh = () => {
+    if (document.visibilityState === "visible") {
+      refreshJobs();
+    }
+  };
+  document.addEventListener("visibilitychange", forceRefresh);
+  window.addEventListener("focus", forceRefresh);
+  window.addEventListener("pageshow", forceRefresh);
+  // Deep-link handoff: when the user clicks the email button while the app
+  // is already open in another tab, the browser reuses that tab and just
+  // updates the hash. We listen for the hash change so we can scroll to and
+  // highlight the tile without a full reload.
+  window.addEventListener("hashchange", () => {
+    refreshJobs().then(() => handleDeepLink());
+  });
+}
+
+// Parse '#job-<id>' from the URL and scroll that job's tile into view.
+// If the tile isn't in the DOM yet (still rendering, or the user just
+// arrived), we wait one poll cycle. Idempotent — safe to call multiple times.
+function handleDeepLink() {
+  const hash = window.location.hash || "";
+  const match = hash.match(/^#job-([A-Za-z0-9\-_]+)/);
+  if (!match) return;
+  const jobId = match[1];
+  // Try immediately; if not found, try once more after the next refresh.
+  const tryScroll = () => {
+    const tile = document.querySelector(`.tile[data-id="${jobId}"]`);
+    if (!tile) return false;
+    tile.scrollIntoView({ behavior: "smooth", block: "center" });
+    tile.classList.add("deep-link-highlight");
+    setTimeout(() => tile.classList.remove("deep-link-highlight"), 2400);
+    // Try to auto-open the video player if the tile has a click handler.
+    // The tile itself is clickable in this app; a synthetic click keeps
+    // behavior consistent with a user tap.
+    tile.click();
+    return true;
+  };
+  if (!tryScroll()) {
+    setTimeout(tryScroll, 1500);
   }
 }
 
@@ -1223,5 +1277,11 @@ updateLengthDisplay();
 (async () => {
   await initAuth();
   renderAuthUI();
+  installVisibilityRefresh();
   await refreshJobs();
+  // Handle deep-links from the completion email (e.g. /#job-abc123).
+  // If the URL has a #job-<id> fragment on load, scroll that tile into
+  // view and open it. If the render is still active we fall through to
+  // the normal polling loop.
+  handleDeepLink();
 })();

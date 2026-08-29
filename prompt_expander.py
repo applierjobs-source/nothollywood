@@ -61,11 +61,28 @@ so the model renders each scene consistently. Each scene should describe a \
 distinct beat of the story with concrete visual action, camera framing, \
 and dialogue where appropriate.
 
-Rules:
+CRITICAL rules about audio and speech:
+- If the user prompt says a character talks, speaks, tells a story, narrates, \
+or otherwise uses spoken language, EVERY scene must maintain that they are \
+speaking (with the specified language) with visible lip movement / mouth \
+sync. Do NOT let later scenes drift into silence, background music only, \
+non-verbal sounds, or generic reactions.
+- If the user prompt specifies English (or any specific language), repeat \
+"speaking in [language] with clear lip sync" in every scene prompt.
+- For animals or non-human characters that talk in the user prompt (e.g. \
+"my dog telling me about her day in English"), each scene must reinforce \
+"[animal] speaks [language] with human-like lip sync, mouth clearly forming \
+words" — never barks / meows / silent reactions unless the user asked for it.
+- Continuous action: pick up each scene where the previous one left off. \
+Mention what the character was doing at the end of the previous scene so \
+the frame-chain handoff (last-frame→first-frame) reads as one continuous shot.
+
+General rules:
 - Every scene prompt MUST embed the style sentence and character descriptions \
 inline. The model sees each scene in isolation — it has no shared context.
 - Keep each scene prompt under 500 characters.
-- Write like a director giving a shot brief: subject, action, camera, mood.
+- Write like a director giving a shot brief: subject, action, camera, mood, \
+audio.
 - If the user names a real public figure (a politician, celebrity), replace \
 with a fictional analog and note this in the `notes` field. The video model \
 will refuse real-public-figure prompts and the whole render will fail.
@@ -243,6 +260,51 @@ def expand_prompt(prompt: str, scene_durations: list[int]) -> dict[str, Any]:
     }
 
 
+# Keywords that indicate spoken dialogue in the user prompt. When any of these
+# appears, we inject an audio-continuity clause into every scene prompt so
+# later scenes don't drift into silence or non-verbal sounds (barks, growls,
+# background music only).
+_SPEECH_KEYWORDS = (
+    "talk", "talking", "talks", "speak", "speaks", "speaking", "tell",
+    "telling", "tells", "say", "saying", "says", "narrate", "narrating",
+    "narrator", "story", "english", "spanish", "french", "conversation",
+    "dialogue", "monologue", "speech", "in english", "about her day",
+    "about his day", "about my day",
+)
+
+
+def _speech_hint(prompt: str) -> str:
+    """Return an audio-continuity clause if the prompt implies spoken dialogue.
+
+    Detects animal-talking prompts too, since MiniMax H3 defaults to bark/meow
+    on non-first scenes even when scene 1 has clear speech.
+    """
+    p = prompt.lower()
+    if not any(kw in p for kw in _SPEECH_KEYWORDS):
+        return ""
+    # Animal-speaking? Extra emphasis — the model needs pushing here.
+    animal_words = ("dog", "cat", "bird", "puppy", "kitten", "parrot", "pet")
+    is_animal = any(a in p for a in animal_words)
+    lang = "English"
+    for kw, name in (("spanish", "Spanish"), ("french", "French"),
+                     ("japanese", "Japanese"), ("german", "German")):
+        if kw in p:
+            lang = name
+            break
+    if is_animal:
+        return (
+            f"AUDIO REQUIREMENT: the animal speaks conversational {lang} with "
+            f"clear human-like lip sync throughout — mouth clearly forming words, "
+            f"never barking, meowing, growling, or silent. Continuous dialogue "
+            f"from the previous shot. "
+        )
+    return (
+        f"AUDIO REQUIREMENT: the character speaks {lang} with clear lip sync "
+        f"throughout — continuous dialogue from the previous shot, never silent "
+        f"or background-music only. "
+    )
+
+
 def _fallback(prompt: str, scene_durations: list[int], t0: float, error: str) -> dict[str, Any]:
     """Fallback: build per-scene prompts the same way we did before expansion.
 
@@ -251,12 +313,15 @@ def _fallback(prompt: str, scene_durations: list[int], t0: float, error: str) ->
     """
     n = len(scene_durations)
     hint = _known_character_hint(prompt) or ""
+    audio_hint = _speech_hint(prompt)
     scenes = []
     for i in range(n):
         s = (
             f"Scene {i+1} of {n} in a continuous story. "
             f"Maintain the exact same characters, wardrobe, setting, and visual style throughout. "
         )
+        if audio_hint:
+            s += audio_hint
         if hint:
             s += f"Style/character reference: {hint} "
         s += prompt.strip()

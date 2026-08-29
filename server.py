@@ -540,8 +540,16 @@ def send_completion_email(user_email: str, job: dict) -> None:
         prompt = (job.get("prompt") or "").strip()
         preview = prompt[:80] + ("…" if len(prompt) > 80 else "")
         video_path = job.get("video") or ""
-        video_url = f"{SITE_URL}{video_path}" if video_path else f"{SITE_URL}/#job-{job_id}"
+        # Both buttons deep-link to the app so the browser reuses an already-open
+        # tab. Previously "Watch it now" pointed at the raw .mp4, which browsers
+        # always open in a new tab because it's a file, not a page. The app
+        # handles the #job-<id> fragment on load and scrolls the tile into view.
         library_url = f"{SITE_URL}/#job-{job_id}"
+        video_url = library_url
+        # We still expose the raw .mp4 as a plain-text fallback for cases where
+        # the app URL is unreachable (e.g. app offline). Only used in the text/plain
+        # body, not in any button.
+        raw_video_url = f"{SITE_URL}{video_path}" if video_path else ""
 
         if status == "done":
             subject = f"Your Not Hollywood render is ready — {duration}s"
@@ -552,20 +560,23 @@ def send_completion_email(user_email: str, job: dict) -> None:
                 f'<p style="margin:0 0 20px;font-size:14px;color:#a8a8a8;">'
                 f'{duration} seconds · {job.get("resolution", "768P")}</p>'
                 f'<p style="margin:0 0 24px;">'
-                f'<a href="{video_url}" '
+                f'<a href="{library_url}" '
                 f'style="display:inline-block;background:#e5322f;color:#fff;'
                 f'text-decoration:none;padding:12px 22px;border-radius:6px;'
-                f'font-weight:600;">Watch it now</a></p>'
-                f'<p style="margin:0;font-size:13px;color:#7a7a7a;">'
-                f'Or open your library: '
-                f'<a href="{library_url}" style="color:#e5322f;">{library_url}</a></p>'
+                f'font-weight:600;">Watch in Not Hollywood</a></p>'
+                + (
+                    f'<p style="margin:0;font-size:13px;color:#7a7a7a;">'
+                    f'Direct video file: '
+                    f'<a href="{raw_video_url}" style="color:#7a7a7a;">download .mp4</a></p>'
+                    if raw_video_url else ""
+                )
             )
             plain = (
                 f"Your Not Hollywood render is ready.\n\n"
                 f'"{preview}"\n'
                 f"{duration} seconds · {job.get('resolution', '768P')}\n\n"
-                f"Watch it: {video_url}\n"
-                f"Library: {library_url}\n"
+                f"Open in Not Hollywood: {library_url}\n"
+                + (f"Direct video file: {raw_video_url}\n" if raw_video_url else "")
             )
         elif status == "failed":
             err = job.get("error", "unknown error")
@@ -637,22 +648,24 @@ def send_completion_email(user_email: str, job: dict) -> None:
 # this bounds our exposure to their rate limits and to token bucket bursts.
 # Env-tunable so we can back off if reAPI starts 429ing under load.
 SCENE_CONCURRENCY = int(os.environ.get("SCENE_CONCURRENCY", "4"))
+# Threshold at/below which we prefer sequential frame-chaining over parallel
+# rendering. Chaining preserves character continuity but N× wall-clock.
+# For short renders (≤60s) continuity dominates; for longer renders parallel
+# wins because the wall-clock penalty is too painful.
+SEQUENTIAL_MAX_SECONDS = int(os.environ.get("SEQUENTIAL_MAX_SECONDS", "60"))
 
 
 def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
-    """Render scenes in parallel (bounded by SCENE_CONCURRENCY), then concat.
+    """Render scenes sequentially with frame-chaining, then concat.
 
-    Design tradeoff vs the previous sequential path:
-      OLD: scene[i+1] used scene[i]'s last frame as ref — tight visual continuity
-           but N× wall clock.
-      NEW: every scene uses the same initial ref (if any) + the same descriptive
-           prompt with 'maintain exact same characters, wardrobe, setting'.
-           Wall clock ≈ slowest single scene. Sitcom-style episodes with distinct
-           scenes (different rooms, time jumps) actually LOOK better this way
-           because each scene composes fresh instead of drifting from prior
-           artifacts. Character/style consistency is best-effort via prompt.
+    Every multi-scene render uses last-frame→first-frame handoff so scene[i+1]
+    starts from scene[i]'s final frame. This preserves character continuity
+    (same dog stays the same dog, same actor stays the same actor).
+
+    Wall clock: N × slowest scene. Users have said this is acceptable — the
+    previous parallel path wrecked continuity by making every scene render
+    fresh from the initial reference (or nothing).
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     job = JOBS.get(job_id)
     if not job:
@@ -660,6 +673,11 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
     scenes = job["scenes_plan"]  # list of ints (durations)
     prompt = job["prompt"]
     resolution = job["resolution"]
+    total_duration = sum(scenes)
+    # User feedback: parallel rendering wrecks character continuity ("keeps
+    # starting each scene over with the reference frame"). Sequential frame-chain
+    # is now the ONLY multi-scene path. Single-scene renders skip the loop entirely.
+    use_sequential = len(scenes) > 1
 
     scene_dir = SCENES / job_id
     scene_dir.mkdir(exist_ok=True)
@@ -769,8 +787,14 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
         ]
         save_jobs(JOBS)
 
-    def _render_scene(idx: int, dur: int) -> tuple[int, bool, str, Path]:
-        """Render one scene in its own thread. Returns (idx, ok, err, out_path)."""
+    def _render_scene(idx: int, dur: int, scene_ref_url: str | None) -> tuple[int, bool, str, Path]:
+        """Render one scene. Returns (idx, ok, err, out_path).
+
+        scene_ref_url:
+          - In parallel mode: same shared initial ref for every scene.
+          - In sequential mode: previous scene's extracted last frame (or the
+            initial ref for idx==0).
+        """
         scene_out = scene_dir / f"scene_{idx:02d}.mp4"
         # Prefer the LLM-expanded per-scene prompt when available (style +
         # character bible embedded inline). Fall back to the raw prompt if
@@ -794,7 +818,7 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
             _publish_agg_status()
 
         ok, err = render_one_scene(
-            scene_prompt, dur, resolution, ref_url, scene_out,
+            scene_prompt, dur, resolution, scene_ref_url, scene_out,
             on_status=_on_status,
         )
         # Terminal state update (render_one_scene doesn't call on_status on exit)
@@ -803,26 +827,43 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
         _publish_agg_status()
         return idx, ok, err, scene_out
 
-    # Kick off all scenes in parallel, bounded by SCENE_CONCURRENCY.
     scene_paths_by_idx: dict[int, Path] = {}
     first_failure: tuple[int, str] | None = None
 
-    with ThreadPoolExecutor(max_workers=SCENE_CONCURRENCY, thread_name_prefix=f"scene-{job_id[:8]}") as pool:
-        futures = {pool.submit(_render_scene, i, dur): i for i, dur in enumerate(scenes)}
-        for fut in as_completed(futures):
-            try:
-                idx, ok, err, out_path = fut.result()
-            except Exception as e:  # noqa: BLE001
-                # Thread crashed — treat as a scene failure.
-                idx = futures[fut]
-                ok, err, out_path = False, f"scene thread crashed: {e}", scene_dir / f"scene_{idx:02d}.mp4"
-            if ok:
-                scene_paths_by_idx[idx] = out_path
-            elif first_failure is None:
+    # ==== SEQUENTIAL FRAME-CHAIN ====
+    # For multi-scene renders: each scene's opening frame is the previous
+    # scene's last frame. For single-scene renders: just render once with the
+    # initial ref (if any).
+    current_ref = ref_url  # initial upload if any, else None
+    j = JOBS.get(job_id)
+    if j is not None:
+        j["render_mode"] = "sequential" if use_sequential else "single"
+        save_jobs(JOBS)
+    for i, dur in enumerate(scenes):
+        try:
+            idx, ok, err, out_path = _render_scene(i, dur, current_ref)
+        except Exception as e:  # noqa: BLE001
+            ok, err, out_path = False, f"scene thread crashed: {e}", scene_dir / f"scene_{i:02d}.mp4"
+            idx = i
+        if not ok:
+            if first_failure is None:
                 first_failure = (idx, err)
-                # Note: don't cancel siblings — letting them finish gives us
-                # partial artifacts for debugging and keeps thread cleanup clean.
-                # The whole render still fails as a unit below.
+            break  # stop the chain — no last frame to chain from
+        scene_paths_by_idx[idx] = out_path
+        # Extract last frame for next scene's ref. If extraction or hosting
+        # fails, we degrade to "no ref" for the next scene rather than aborting.
+        if i + 1 < len(scenes):
+            frame_name = f"chain_{job_id}_{i:02d}.jpg"
+            frame_path = FRAMES / frame_name
+            extracted = extract_last_frame(out_path, frame_path)
+            if extracted and PUBLIC_ORIGIN:
+                current_ref = f"{PUBLIC_ORIGIN}/static/frames/{frame_name}"
+            else:
+                # No public origin means reAPI can't fetch our frame. Keep going
+                # with prompt-only continuity — still better than random.
+                current_ref = None
+                if not PUBLIC_ORIGIN:
+                    print(f"[render {job_id}] no PUBLIC_ORIGIN set \u2014 frame-chain degraded to prompt-only")
 
     if first_failure is not None:
         idx, err = first_failure
