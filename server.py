@@ -116,12 +116,59 @@ SCENES = ROOT / "scenes"  # per-scene mp4s before concat
 FRAMES = STATIC / "frames"  # reference frames (uploads + extracted last frames)
                             # served publicly at /static/frames/<name> so reAPI
                             # can fetch them for first_frame_url
+FRANCHISE_REFS = STATIC / "franchise-refs"  # curated cast reference frames
+                                            # one per franchise slug
+                                            # served publicly at
+                                            # /static/franchise-refs/<slug>.png
 
 STATIC.mkdir(exist_ok=True)
 VIDEOS.mkdir(exist_ok=True)
 THUMBS.mkdir(exist_ok=True)
 SCENES.mkdir(exist_ok=True)
 FRAMES.mkdir(exist_ok=True)
+FRANCHISE_REFS.mkdir(exist_ok=True)
+
+
+# Franchise reference pack: when a user prompt clearly references a known
+# named-cast show, we auto-attach a curated cast group photo as the initial
+# reference frame so scene 1 renders with the right faces. Frame-chaining
+# then locks those faces in for every subsequent scene. This is the ONLY
+# way to get recognizable named-cast likenesses out of MiniMax H3 — the
+# model won't accept real actor names in the prompt (content filter), and
+# text descriptions alone produce generic look-alikes.
+#
+# Slug → (filename in FRANCHISE_REFS/, list of prompt substrings to match).
+# Match is case-insensitive; the first franchise whose ANY keyword hits wins.
+FRANCHISE_REF_PACKS: list[tuple[str, str, tuple[str, ...]]] = [
+    ("seinfeld", "seinfeld.png", (
+        "seinfeld", "jerry seinfeld", "george costanza", "kramer",
+        "elaine benes", "monk's cafe", "monks cafe",
+    )),
+    ("the-office", "the-office.png", (
+        "the office", "michael scott", "dwight schrute", "jim halpert",
+        "pam beesly", "dunder mifflin",
+    )),
+]
+
+
+def pick_franchise_ref(prompt: str) -> str | None:
+    """If the prompt matches a known franchise AND we have a cast reference on
+    disk AND PUBLIC_ORIGIN is set, return the public https URL of that
+    reference. Otherwise return None so the caller falls back to normal
+    upload-or-nothing behavior.
+
+    Deliberately returns None in dev (no PUBLIC_ORIGIN) rather than a local
+    path — reAPI requires a fetchable https URL for first_frame_url.
+    """
+    if not PUBLIC_ORIGIN:
+        return None
+    p = (prompt or "").lower()
+    for slug, filename, keywords in FRANCHISE_REF_PACKS:
+        if any(kw in p for kw in keywords):
+            ref_path = FRANCHISE_REFS / filename
+            if ref_path.exists():
+                return f"{PUBLIC_ORIGIN}/static/franchise-refs/{filename}"
+    return None
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -1329,6 +1376,7 @@ async def generate(
 
     # Save uploaded reference under /static/frames/ so reAPI can fetch it.
     ref_url: str | None = None
+    ref_source: str = "none"  # "upload" | "franchise" | "none"
     if reference is not None:
         raw = await reference.read()
         if len(raw) > 8 * 1024 * 1024:
@@ -1340,8 +1388,18 @@ async def generate(
         (FRAMES / ref_name).write_bytes(raw)
         if PUBLIC_ORIGIN:
             ref_url = f"{PUBLIC_ORIGIN}/static/frames/{ref_name}"
+            ref_source = "upload"
         # If PUBLIC_ORIGIN is unset (dev with no public URL), we silently drop
         # the reference. Better than sending a data URL that reAPI will reject.
+    else:
+        # No user upload — see if the prompt names a franchise we have a cast
+        # reference for. This is what makes 'generate a Seinfeld episode' work:
+        # we hand MiniMax a curated group photo of the cast so scene 1 renders
+        # with recognizable faces, then frame-chain locks them in for the rest.
+        fr = pick_franchise_ref(prompt)
+        if fr:
+            ref_url = fr
+            ref_source = "franchise"
     JOBS[job_id] = {
         "id": job_id,
         "prompt": prompt.strip(),
@@ -1355,6 +1413,8 @@ async def generate(
         "created_at": time.time(),
         "user_id": user_id,
         "user_email": user_email,
+        "ref_source": ref_source,
+        "ref_url": ref_url,
     }
     save_jobs(JOBS)
     Thread(target=multi_scene_worker, args=(job_id, ref_url), daemon=True).start()
