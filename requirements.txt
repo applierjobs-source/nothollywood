@@ -3,3 +3,4 @@ uvicorn[standard]==0.30.6
 requests==2.32.3
 python-multipart==0.0.9
 python-jose[cryptography]==3.3.0
+ddgs==9.16.0

@@ -463,9 +463,35 @@ _DDG_PROMO_DOMAINS = (
 )
 
 
+def _ddg_search_images_ddgs(query: str) -> list[dict]:
+    """Try the `ddgs` PyPI library first — it uses primp (impersonation) so
+    Railway's cloud IP range doesn't get rate-limited by DDG's HTML endpoint.
+    Returns raw hits shaped like the JSON API (image/width/height keys)."""
+    try:
+        from ddgs import DDGS  # type: ignore
+    except Exception as e:
+        print(f"[franchise_ref] ddgs lib not available ({type(e).__name__}): {e}")
+        return []
+    try:
+        with DDGS() as ddgs:
+            return list(ddgs.images(query, max_results=30))
+    except Exception as e:
+        print(f"[franchise_ref] ddgs.images exception for '{query}' ({type(e).__name__}): {e}")
+        return []
+
+
 def _ddg_search_images(session: requests.Session, query: str) -> list[dict]:
     """Run one DDG image search and return the raw results list. Empty on
-    any failure."""
+    any failure.
+
+    Tries the ddgs PyPI library first (primp-backed, handles anti-bot on
+    cloud IPs), then falls back to the raw i.js JSON API if the library is
+    missing or blocked.
+    """
+    lib_hits = _ddg_search_images_ddgs(query)
+    if lib_hits:
+        return lib_hits
+
     vqd = _ddg_get_vqd(session, query)
     if not vqd:
         print(f"[franchise_ref] ddg: no vqd for query='{query}'")
@@ -800,9 +826,16 @@ def resolve_franchise_ref(
 
     franchise_refs_dir.mkdir(parents=True, exist_ok=True)
 
-    # Check every extension we might have cached under.
+    # Cache-schema version. Bump whenever the search/generation pipeline
+    # changes materially so old cached frames (e.g. drifted Grok outputs
+    # from the pre-DDG-priority era) don't keep serving. Old files are
+    # left on disk but simply not looked up.
+    cache_prefix = "v2-"
+
+    # Check every extension we might have cached under (with the current
+    # cache-schema prefix).
     for ext in ("png", "jpg", "webp"):
-        cached = franchise_refs_dir / f"{slug}.{ext}"
+        cached = franchise_refs_dir / f"{cache_prefix}{slug}.{ext}"
         if cached.exists() and cached.stat().st_size >= 5_000:
             return {
                 "url": f"{public_origin}/static/franchise-refs/{cached.name}",
@@ -829,7 +862,7 @@ def resolve_franchise_ref(
         return None
 
     data, ext = got
-    out = franchise_refs_dir / f"{slug}.{ext}"
+    out = franchise_refs_dir / f"{cache_prefix}{slug}.{ext}"
     try:
         out.write_bytes(data)
     except Exception as e:
