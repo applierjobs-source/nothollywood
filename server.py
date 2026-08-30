@@ -1128,6 +1128,11 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
         # Anonymous jobs (no user_id) are skipped inside save_render_to_library.
         try:
             import library as _lib
+            print(
+                f"[render {job_id}] library save starting: enabled={_lib.library_enabled()} "
+                f"user_id={(j.get('user_id') or '')[:12]!r} dest={dest} "
+                f"exists={dest.exists()} bytes={dest.stat().st_size if dest.exists() else 0}"
+            )
             library_meta = {
                 "title": j.get("franchise_title"),
                 "slug": j.get("franchise_slug"),
@@ -1144,11 +1149,14 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
                 video_path=dest,
                 meta=library_meta,
             )
+            print(f"[render {job_id}] library save result: saved={saved}")
             if saved:
                 j["saved_to_library"] = True
                 save_jobs(JOBS)
         except Exception as e:
+            import traceback
             print(f"[render {job_id}] library save exception (non-fatal): {e}")
+            traceback.print_exc()
     else:
         j["status"] = "failed"
         j["error"] = f"finalize failed: {err}"
@@ -1803,12 +1811,58 @@ async def get_library(request: Request):
     Each item includes a short-lived signed video URL and (if we have one) a
     signed thumbnail URL. URLs expire in 1 hour, matching Supabase's default
     signed-URL policy. Anonymous callers get a 401.
+
+    Retroactive rescue: any completed job in JOBS that belongs to the caller
+    and hasn't been saved yet gets uploaded on this read. This heals renders
+    that finished before the library-save code shipped, or that missed the
+    upload for any transient reason.
     """
     claims = require_user(request)
     user_id = claims.get("sub") or ""
     if not user_id:
         raise HTTPException(401, "authentication required")
     import library as _lib
+
+    # Retroactive save: scan this user's completed jobs, save any that
+    # aren't marked saved_to_library. Best-effort; failures are logged but
+    # never block the listing.
+    for jid, job in list(JOBS.items()):
+        if job.get("user_id") != user_id:
+            continue
+        if job.get("status") != "done":
+            continue
+        if job.get("saved_to_library"):
+            continue
+        video_rel = job.get("video") or ""
+        if not video_rel.startswith("/static/videos/"):
+            continue
+        local_path = VIDEOS / f"{jid}.mp4"
+        if not local_path.exists() or local_path.stat().st_size == 0:
+            continue
+        try:
+            meta = {
+                "title": job.get("franchise_title"),
+                "slug": job.get("franchise_slug"),
+                "duration": job.get("duration") or sum(job.get("scenes") or []),
+                "resolution": job.get("resolution"),
+                "scene_count": len(job.get("scenes") or [1]),
+                "scenes": job.get("scenes") or [],
+                "franchise_ref_url": job.get("ref_url_used") or job.get("franchise_ref_url"),
+            }
+            ok_save = _lib.save_render_to_library(
+                job_id=jid,
+                user_id=user_id,
+                prompt=job.get("prompt") or "",
+                video_path=local_path,
+                meta=meta,
+            )
+            if ok_save:
+                job["saved_to_library"] = True
+                save_jobs(JOBS)
+                print(f"[library retro] rescued {jid} for {user_id[:8]}")
+        except Exception as e:
+            print(f"[library retro] {jid} failed: {e}")
+
     rows = _lib.list_renders(user_id)
     out = []
     for row in rows:
