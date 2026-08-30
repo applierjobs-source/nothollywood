@@ -8,7 +8,7 @@ subsequent scene.
 
 Pipeline (each step is skippable):
 
-    1. Extract show title from prompt (regex first, LLM fallback if available).
+    1. Extract show title from prompt via Grok (LLM-only; LRU-cached).
     2. Look up disk cache at FRANCHISE_REFS/<slug>.png. Hit -> done.
     3. On miss: try Option B (web image search for a real cast still).
     4. If Option B fails: try Option A (LLM-described AI group shot).
@@ -57,101 +57,53 @@ REQUEST_TIMEOUT = 30  # seconds; keep single request cheap
 
 
 # ---------------------------------------------------------------------------
-# Step 1: Show-title extraction
+# Step 1: Show-title extraction (Grok-only)
 # ---------------------------------------------------------------------------
+#
+# Previous versions of this module tried a case-sensitive regex first
+# and only fell through to Grok on a miss. That was cheap but brittle:
+# "Everybody loves Raymond episode" (lowercase 'loves') truncated to
+# just "Everybody", which then got searched as a Nintendo Switch game.
+# Grok knows every well-known TV show/movie, handles casing, typos,
+# nicknames ("ELR", "the office"), and returns the canonical title.
+#
+# Cost: ~200 tokens per /api/plan call at grok-4-fast-non-reasoning
+# pricing. We're already paying Grok for scene expansion in the same
+# request, so the marginal cost is trivial. In-memory LRU cache below
+# keeps repeated identical prompts free.
 
-# Common patterns like "generate a Seinfeld episode", "an episode of Friends",
-# "make a Curb Your Enthusiasm scene". Captures the show title as group 1.
-# We keep these lenient -- if regex misses we fall through to LLM.
-# Title body: capital-first tokens ONLY (case-sensitive), with allowed short
-# lowercase glue words ('of', 'the', 'and') between capitalized tokens so
-# names like 'Rick and Morty' or 'Curb Your Enthusiasm' still match. We stop
-# as soon as we hit a lowercase content word ("where Michael quits", "about
-# the gang") because those clearly aren't part of the title.
-_TITLE_CORE = (
-    r"[A-Z][\w'&.\-]*"
-    r"(?:\s+(?:[A-Z][\w'&.\-]*|and|of|the|in|on|for|to|a|&))*"
-)
-_TITLE_BODY = rf"({_TITLE_CORE})"
-
-# Trigger words are still matched case-insensitively via inline (?i:...)
-# groups so 'Generate' / 'GENERATE' / 'generate' all work, while the title
-# body regex stays case-sensitive.
-_TRIGGERS_VERB = r"(?i:generate|make|create|write|produce)"
-_TRIGGERS_ARTICLE = r"(?i:an?\s+)?"
-_TRIGGERS_EPISODE = r"(?i:episode|scene|clip|pilot)"
-
-_TITLE_REGEXES: tuple[re.Pattern, ...] = (
-    # "episode of Seinfeld", "scene from Friends"
-    re.compile(rf"(?i:episode|scene|clip|pilot)\s+(?i:of|from)\s+{_TITLE_BODY}"),
-    # "generate a Seinfeld episode", "make an Office scene"
-    re.compile(rf"{_TRIGGERS_VERB}\s+{_TRIGGERS_ARTICLE}{_TITLE_BODY}\s+{_TRIGGERS_EPISODE}"),
-    # Leading article: "A Seinfeld episode where..."
-    re.compile(rf"^\s*(?i:an?\s+){_TITLE_BODY}\s+{_TRIGGERS_EPISODE}\b"),
-    # "Seinfeld episode" at start
-    re.compile(rf"^\s*{_TITLE_BODY}\s+{_TRIGGERS_EPISODE}\b"),
-)
+from functools import lru_cache
 
 
-# Words that show up in false-positive captures and should be rejected as
-# titles. This is intentionally short -- LLM step handles edge cases.
-_BAD_TITLES = {
-    "the", "a", "an", "new", "another", "fake", "short", "long", "quick",
-    "funny", "cool", "great", "sample", "test", "demo", "brief",
-}
-
-
-_GLUE_WORDS = {"and", "of", "the", "in", "on", "for", "to", "a", "&"}
-
-
-def _clean_title(raw: str) -> str:
-    t = re.sub(r"\s+", " ", raw).strip(" ,.:;'-\"")
-    # Strip trailing lowercase glue words captured by the regex's optional tail
-    # ("Breaking Bad in the" -> "Breaking Bad").
-    parts = t.split(" ")
-    while parts and parts[-1].lower() in _GLUE_WORDS:
-        parts.pop()
-    return " ".join(parts)
-
-
-def _looks_like_title(title: str) -> bool:
-    if not title:
-        return False
-    lowered = title.lower()
-    if lowered in _BAD_TITLES:
-        return False
-    # Reject captures that are pure lowercase common words.
-    if lowered.split()[0] in _BAD_TITLES and len(title.split()) == 1:
-        return False
-    return True
-
-
-def _regex_extract_title(prompt: str) -> Optional[str]:
-    for pat in _TITLE_REGEXES:
-        m = pat.search(prompt)
-        if not m:
-            continue
-        title = _clean_title(m.group(1))
-        if _looks_like_title(title):
-            return title
-    return None
-
-
+@lru_cache(maxsize=512)
 def _llm_extract_title(prompt: str) -> Optional[str]:
-    """Ask Grok to name the show if the prompt clearly references one. Returns
-    None on no key, ambiguous prompt, or any error. Never raises."""
+    """Ask Grok to name the show if the prompt clearly references one.
+
+    Returns the canonical title (e.g. 'Everybody Loves Raymond') or
+    None when the prompt describes an original scene, references a
+    fictional show, or the API is unavailable. Never raises.
+
+    Cached per exact prompt string so repeat /api/plan calls with the
+    same input skip the network round-trip entirely.
+    """
     if not XAI_API_KEY:
         return None
     system = (
         "You extract a SINGLE TV show or movie title from a user's video-"
         "generation prompt. If the prompt clearly references an existing "
-        "well-known TV show or movie by name, output that title. Otherwise "
-        "output the exact string NONE.\n\n"
+        "well-known TV show or movie by name, output the CANONICAL FULL "
+        "title. Otherwise output the exact string NONE.\n\n"
         "Output rules:\n"
         "- Just the canonical title, nothing else. No punctuation, no quotes.\n"
+        "- Full official title. NEVER truncate. 'everybody loves raymond' -> "
+        "'Everybody Loves Raymond', not 'Everybody'. 'elr' -> "
+        "'Everybody Loves Raymond'. 'the office' -> 'The Office'. "
+        "'seinfeld ep' -> 'Seinfeld'. 'curb' -> 'Curb Your Enthusiasm'.\n"
+        "- Case doesn't matter in the input. Always output canonical casing.\n"
         "- No franchise expansion (Star Wars -> Star Wars, not A New Hope).\n"
         "- If the prompt only describes an original scene, output NONE.\n"
-        "- If the show is fictional or made up by the user, output NONE."
+        "- If the show is fictional or made up by the user, output NONE.\n"
+        "- If ambiguous between shows, pick the most well-known one."
     )
     body = {
         "model": XAI_MODEL,
@@ -194,14 +146,16 @@ def _llm_extract_title(prompt: str) -> Optional[str]:
 
 
 def extract_show_title(prompt: str) -> Optional[str]:
-    """Return canonical show title or None. Regex first (free, deterministic),
-    LLM second (needs XAI_API_KEY). Never raises."""
+    """Return canonical show title or None.
+
+    Grok is the only extraction path. It handles arbitrary casing,
+    typos, abbreviations, and always returns the full canonical title.
+    Falls through to None only when XAI_API_KEY is unset or the API
+    call fails. Never raises.
+    """
     if not prompt:
         return None
-    t = _regex_extract_title(prompt)
-    if t:
-        return t
-    return _llm_extract_title(prompt)
+    return _llm_extract_title(prompt.strip())
 
 
 # ---------------------------------------------------------------------------
