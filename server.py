@@ -781,9 +781,13 @@ def send_completion_email(user_email: str, job: dict) -> None:
             timeout=15,
         )
         if r.status_code >= 300:
-            print(f"[email {job_id}] resend {r.status_code}: {r.text[:200]}")
+            print(f"[email {job_id}] resend {r.status_code} from={EMAIL_FROM} to={user_email}: {r.text[:300]}")
         else:
-            print(f"[email {job_id}] sent to {user_email}")
+            try:
+                msg_id = (r.json() or {}).get("id", "?")
+            except Exception:
+                msg_id = "?"
+            print(f"[email {job_id}] sent from={EMAIL_FROM} to={user_email} resend_id={msg_id}")
     except Exception as e:
         print(f"[email {job.get('id','?')}] send failed: {e}")
 
@@ -1920,6 +1924,8 @@ def provider_status():
         "reapi_key": bool(API_KEY),
         "public_origin": bool(PUBLIC_ORIGIN),
         "resend_email": bool(os.environ.get("RESEND_API_KEY")),
+        "email_from": EMAIL_FROM if os.environ.get("RESEND_API_KEY") else None,
+        "supabase_service_key": bool(os.environ.get("SUPABASE_SERVICE_ROLE_KEY")),
         "stripe": bool(os.environ.get("STRIPE_SECRET_KEY")),
         "franchise_refs_cached": sorted([
             p.stem for p in FRANCHISE_REFS.glob("*") if p.is_file()
