@@ -1598,10 +1598,9 @@ textarea::placeholder { color: var(--text-faint); }
     white-space: nowrap;
     letter-spacing: 0.04em;
   }
-  /* Signed-out compact: hide search + wordmark accent when Sign In is
-     showing so the CTA has room. Search isn't wired yet anyway. */
+  /* Signed-out compact: hide search when Sign In is showing so the CTA
+     has room. Wordmark accent stays — "Not Hollywood" is the brand. */
   .nav-right:has(.nav-auth-btn:not([hidden])) .nav-search { display: none; }
-  .nav-inner:has(.nav-auth-btn:not([hidden])) .wordmark-accent { display: none; }
 
   /* Create a Show CTA: shrink label to just the plus + "New", or hide the
      label entirely if there's still no room. The pseudo elements ensure
@@ -1619,7 +1618,8 @@ textarea::placeholder { color: var(--text-faint); }
      - Hide search icon (unwired anyway; the composer is the main entry).
      - Hide the "credits" label; keep just the number as a chip.
      - Hide the wordmark accent "Hollywood" so the credits chip + sign
-       out + primary CTA all fit within the viewport. */
+       out + primary CTA all fit within the viewport. Only in the
+       signed-in state because that's the only one that's too tight. */
   .nav-user-email { display: none; }
   .nav-right:has(.nav-user:not([hidden])) .nav-search { display: none; }
   .nav-inner:has(.nav-user:not([hidden])) .wordmark-accent { display: none; }
