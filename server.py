@@ -345,13 +345,28 @@ def _reapi_resolution(res: str) -> str:
     return _REAPI_RESOLUTIONS.get(res, "768P")
 
 
-def submit_h3(prompt: str, duration: int, resolution: str, ref_url: str | None) -> tuple[str | None, str | None]:
+def submit_h3(
+    prompt: str,
+    duration: int,
+    resolution: str,
+    ref_url: str | None,
+    ref_mode: str = "first_frame",
+) -> tuple[str | None, str | None]:
     """Submit a scene to reAPI's minimax-h3 endpoint.
 
     ref_url must be a public https URL — reAPI rejects data URLs. When ref_url is
     provided, aspect_ratio is omitted (orientation derives from the source image).
     content_filter is disabled unconditionally; that is the entire reason we picked
     reAPI over MiniMax direct.
+
+    ref_mode selects how the reference image is used:
+      - "first_frame": legacy image-to-video (I2V) mode. The reference IS the
+        literal opening frame. Correct for scene-chaining (last frame of scene N
+        becomes first frame of scene N+1).
+      - "subject": reference-to-video (R2V) mode via reference_image_urls. The
+        reference anchors character identity but is NOT the opening frame.
+        Correct for scene 0 when the user picks a promo/cast photo — avoids
+        showing that photo as the first ~0.5s of the video.
     """
     body: dict = {
         "model": "minimax-h3",
@@ -360,7 +375,14 @@ def submit_h3(prompt: str, duration: int, resolution: str, ref_url: str | None) 
         "resolution": _reapi_resolution(resolution),
         "content_filter": False,
     }
-    if ref_url:
+    if ref_url and ref_mode == "subject":
+        # R2V: reference_image_urls anchors identity without becoming the first
+        # frame. aspect_ratio defaults to "adaptive" and is optional here — we
+        # pass 16:9 explicitly so the output matches the rest of the pipeline.
+        body["reference_image_urls"] = [ref_url]
+        body["aspect_ratio"] = "16:9"
+    elif ref_url:
+        # I2V: legacy first-frame chaining path.
         body["first_frame_url"] = ref_url
     else:
         body["aspect_ratio"] = "16:9"
@@ -596,14 +618,16 @@ def render_one_scene(
     ref_data_url: str | None,
     scene_out_path: Path,
     on_status,
+    ref_mode: str = "first_frame",
 ) -> tuple[bool, str]:
     """Submit one scene to MiniMax H3; on sensitivity rejection, fall back to Grok Imagine.
 
     on_status(status: str) called periodically for UI updates.
+    ref_mode selects I2V ("first_frame") vs R2V ("subject") — see submit_h3.
     Returns (ok, error).
     """
     submit_start = time.time()
-    task_id, err = submit_h3(scene_prompt, duration, resolution, ref_data_url)
+    task_id, err = submit_h3(scene_prompt, duration, resolution, ref_data_url, ref_mode=ref_mode)
     submit_took = time.time() - submit_start
     if not task_id:
         # Submit itself failed. If it's a sensitivity rejection, try Grok directly.
@@ -948,13 +972,22 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
         ]
         save_jobs(JOBS)
 
-    def _render_scene(idx: int, dur: int, scene_ref_url: str | None) -> tuple[int, bool, str, Path]:
+    def _render_scene(
+        idx: int, dur: int, scene_ref_url: str | None, ref_mode: str = "first_frame"
+    ) -> tuple[int, bool, str, Path]:
         """Render one scene. Returns (idx, ok, err, out_path).
 
         scene_ref_url:
           - In parallel mode: same shared initial ref for every scene.
           - In sequential mode: previous scene's extracted last frame (or the
             initial ref for idx==0).
+
+        ref_mode:
+          - "subject" for scene 0 when the ref is the user's picked promo/cast
+            photo — keeps that photo out of the opening frame.
+          - "first_frame" for chained scenes (idx > 0) so the last frame of
+            scene N — an actual generated in-story frame — becomes scene N+1's
+            opening frame for seamless continuity.
         """
         scene_out = scene_dir / f"scene_{idx:02d}.mp4"
         # Prefer the LLM-expanded per-scene prompt when available (style +
@@ -980,7 +1013,7 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
 
         ok, err = render_one_scene(
             scene_prompt, dur, resolution, scene_ref_url, scene_out,
-            on_status=_on_status,
+            on_status=_on_status, ref_mode=ref_mode,
         )
         # Terminal state update (render_one_scene doesn't call on_status on exit)
         scene_states[idx] = "succeeded" if ok else "failed"
@@ -996,13 +1029,18 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
     # scene's last frame. For single-scene renders: just render once with the
     # initial ref (if any).
     current_ref = ref_url  # initial upload if any, else None
+    # Scene 0 uses the user-picked reference as an identity anchor (R2V) so
+    # that photo doesn't show up as the opening frame. Scenes 1+ chain from
+    # the previous scene's extracted last frame, which IS meant to be the
+    # opening frame (I2V) for seamless continuity.
+    current_ref_mode = "subject" if current_ref else "first_frame"
     j = JOBS.get(job_id)
     if j is not None:
         j["render_mode"] = "sequential" if use_sequential else "single"
         save_jobs(JOBS)
     for i, dur in enumerate(scenes):
         try:
-            idx, ok, err, out_path = _render_scene(i, dur, current_ref)
+            idx, ok, err, out_path = _render_scene(i, dur, current_ref, ref_mode=current_ref_mode)
         except Exception as e:  # noqa: BLE001
             ok, err, out_path = False, f"scene thread crashed: {e}", scene_dir / f"scene_{i:02d}.mp4"
             idx = i
@@ -1019,10 +1057,13 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
             extracted = extract_last_frame(out_path, frame_path)
             if extracted and PUBLIC_ORIGIN:
                 current_ref = f"{PUBLIC_ORIGIN}/static/frames/{frame_name}"
+                # From scene 1 onward the ref IS the intended opening frame.
+                current_ref_mode = "first_frame"
             else:
                 # No public origin means reAPI can't fetch our frame. Keep going
                 # with prompt-only continuity — still better than random.
                 current_ref = None
+                current_ref_mode = "first_frame"
                 if not PUBLIC_ORIGIN:
                     print(f"[render {job_id}] no PUBLIC_ORIGIN set \u2014 frame-chain degraded to prompt-only")
 
