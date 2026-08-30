@@ -43,6 +43,9 @@ const el = {
   navCredits: $("#navCredits"),
   navCreditsValue: $("#navCreditsValue"),
   authModal: $("#authModal"),
+  renderStartedModal: $("#renderStartedModal"),
+  renderStartedEmail: $("#renderStartedEmail"),
+  renderStartedEta: $("#renderStartedEta"),
   authError: $("#authError"),
   authTitle: $("#authTitle"),
   authSub: $("#authSub"),
@@ -405,10 +408,12 @@ if (ctaBandBtn) ctaBandBtn.addEventListener("click", () => openComposer());
 
 document.querySelectorAll(".nav-tabs a").forEach((a) => {
   a.addEventListener("click", (e) => {
+    // External links (like /pricing.html) have no data-tab. Let the browser handle them.
+    const tab = a.dataset.tab;
+    if (!tab) return;
     e.preventDefault();
     document.querySelectorAll(".nav-tabs a").forEach((x) => x.classList.remove("active"));
     a.classList.add("active");
-    const tab = a.dataset.tab;
     const target = tab === "home" ? el.hero
       : tab === "renders" ? el.shelfRenders
       : tab === "ideas" ? document.querySelector("#shelfIdeas")
@@ -699,6 +704,18 @@ async function submitGenerate({ prompt, duration, resolution, chosenRefUrl, chos
     setTimeout(() => openAuthModal("signin"), 200);
     throw new Error("session expired — sign in again");
   }
+  if (r.status === 402) {
+    // Out of credits — send them to pricing rather than a generic error toast.
+    let msg = "You don’t have enough credits for this render.";
+    try {
+      const body = await r.json();
+      if (body && body.detail && body.detail.message) msg = body.detail.message;
+    } catch (_) { /* body wasn't JSON */ }
+    if (window.confirm(msg + "\n\nOpen pricing to add credits?")) {
+      window.location.href = "/pricing.html";
+    }
+    throw new Error(msg);
+  }
   if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`);
   await r.json();
 
@@ -708,6 +725,25 @@ async function submitGenerate({ prompt, duration, resolution, chosenRefUrl, chos
   el.prompt.dispatchEvent(new Event("input"));
   showDropEmpty();
   pendingUpload = null;
+
+  // Prominent post-submit notice: reassure the user they can leave and
+  // an email will land when the render is ready. Personalize with their
+  // Google-linked address and a duration-aware ETA.
+  try {
+    if (el.renderStartedEmail) {
+      el.renderStartedEmail.textContent = (currentUser && currentUser.email) || "your inbox";
+    }
+    if (el.renderStartedEta) {
+      const d = currentDuration();
+      let eta = "3–6 minutes";
+      if (d > 60) eta = "10–30 minutes";
+      if (d > 300) eta = "30–60 minutes";
+      if (d > 900) eta = "1–2 hours";
+      el.renderStartedEta.textContent = eta;
+    }
+    openModal(el.renderStartedModal);
+  } catch (e) { /* non-fatal: modal is optional decoration */ }
+
   setTimeout(() => {
     refreshJobs().then(() => {
       el.shelfActive.scrollIntoView({ behavior: "smooth", block: "start" });

@@ -963,6 +963,7 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
             job["status"] = "failed"
             job["error"] = f"scene {idx+1}/{len(scenes)}: {err}"
             job["finished_at"] = time.time()
+            refund_credits_for_failed_job(job)
             save_jobs(JOBS)
             send_completion_email(job.get("user_email") or "", job)
         return
@@ -1041,6 +1042,7 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
         j["status"] = "failed"
         j["error"] = f"finalize failed: {err}"
         j["finished_at"] = time.time()
+        refund_credits_for_failed_job(j)
     save_jobs(JOBS)
     send_completion_email(j.get("user_email") or "", j)
 
@@ -1203,6 +1205,86 @@ def _verify_stripe_signature(payload: bytes, sig_header: str, secret: str) -> bo
     signed = f"{timestamp}.{payload.decode('utf-8')}".encode("utf-8")
     expected = hmac.new(secret.encode("utf-8"), signed, hashlib.sha256).hexdigest()
     return any(hmac.compare_digest(expected, s) for s in signatures)
+
+
+def credit_cost_for(duration: int, resolution: str) -> int:
+    """Match the pricing page contract: 1 credit = 1 second at 768P;
+    1080P/2K costs 2 credits per second. Minimum 1 credit per render.
+    """
+    per_sec = 2 if resolution == "1080P" else 1
+    return max(1, int(duration) * per_sec)
+
+
+def _adjust_credits_via_supabase(user_id: str, delta: int) -> tuple[bool, str, int | None]:
+    """Atomically adjust `user_credits.balance` by `delta` (positive = grant,
+    negative = debit). Fails without changing balance when `delta < 0` and the
+    user doesn't have enough credits. Returns (ok, message, new_balance).
+
+    Note: PostgREST doesn't support conditional writes, so we do a
+    read-check-write. Small race window is acceptable for now (single-user
+    interaction; concurrent renders from the same account are rare).
+    Requires SUPABASE_SERVICE_ROLE_KEY.
+    """
+    if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        return False, "supabase service role not configured", None
+
+    read = requests.get(
+        f"{SUPABASE_URL}/rest/v1/user_credits",
+        params={"user_id": f"eq.{user_id}", "select": "balance"},
+        headers={
+            "apikey": SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        },
+        timeout=10,
+    )
+    if not read.ok:
+        return False, f"read failed: {read.status_code} {read.text[:200]}", None
+    rows = read.json()
+    current = rows[0]["balance"] if rows else 0
+    new_balance = current + delta
+    if new_balance < 0:
+        return False, f"insufficient credits: have {current}, need {-delta}", current
+
+    up = requests.post(
+        f"{SUPABASE_URL}/rest/v1/user_credits",
+        params={"on_conflict": "user_id"},
+        headers={
+            "apikey": SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates",
+        },
+        json={"user_id": user_id, "balance": new_balance},
+        timeout=10,
+    )
+    if not up.ok:
+        return False, f"upsert failed: {up.status_code} {up.text[:200]}", None
+    return True, f"balance {current} → {new_balance}", new_balance
+
+
+def refund_credits_for_failed_job(job: dict) -> None:
+    """Best-effort refund of a failed render. Idempotent: sets
+    `credits_refunded=True` on the job so a repeated failure code path
+    (e.g. worker error → finalize error) can't double-refund.
+    """
+    if not job:
+        return
+    if job.get("credits_refunded"):
+        return
+    debit = int(job.get("credits_debited") or 0)
+    if debit <= 0:
+        return
+    user_id = job.get("user_id")
+    if not user_id:
+        return
+    try:
+        ok, msg, _ = _adjust_credits_via_supabase(user_id, debit)
+        job["credits_refunded"] = True
+        job["credits_refund_note"] = msg if ok else f"refund failed: {msg}"
+        print(f"[credits] {'refunded' if ok else 'REFUND FAILED'} {debit} to {user_id}: {msg}")
+    except Exception as e:
+        job["credits_refund_note"] = f"refund exception: {e}"
+        print(f"[credits] refund exception for {user_id}: {e}")
 
 
 def _grant_credits_via_supabase(user_id: str, credits: int) -> tuple[bool, str]:
@@ -1689,6 +1771,38 @@ async def generate(
         raise HTTPException(400, "duration must be between 4 and 600 seconds")
     if resolution not in ("768P", "1080P"):
         raise HTTPException(400, "resolution must be 768P or 1080P")
+
+    # ── Credit gate ─────────────────────────────────────────────────
+    # Debit BEFORE we do any expensive work. If the render fails we refund
+    # in the worker's failure paths. Skipped in AUTH_DISABLED mode (no user).
+    render_cost = credit_cost_for(duration, resolution)
+    credits_debited = 0
+    if user_id and SUPABASE_SERVICE_ROLE_KEY:
+        ok, msg, new_balance = _adjust_credits_via_supabase(user_id, -render_cost)
+        if not ok:
+            if "insufficient credits" in msg:
+                # 402 Payment Required — the frontend can catch this and open
+                # the pricing page instead of showing a generic error.
+                raise HTTPException(
+                    status_code=402,
+                    detail={
+                        "error": "insufficient_credits",
+                        "required": render_cost,
+                        "resolution": resolution,
+                        "duration": duration,
+                        "message": (
+                            f"You need {render_cost} credits to render "
+                            f"{duration}s at {resolution}. Add more credits to continue."
+                        ),
+                    },
+                )
+            # Supabase glitch — refuse the render rather than let it through
+            # for free, since we can't guarantee we'll be able to debit later.
+            print(f"[credits] debit failed for {user_id}: {msg}")
+            raise HTTPException(status_code=503, detail="credits system unavailable, try again in a moment")
+        credits_debited = render_cost
+        print(f"[credits] debited {render_cost} from {user_id}: {msg}")
+
     scenes_plan = plan_scenes(duration)
     job_id = uuid.uuid4().hex[:12]
 
@@ -1766,6 +1880,8 @@ async def generate(
         "ref_source": ref_source,
         "ref_url": ref_url,
         "preapproved_scene_prompts": preapproved_scene_prompts,
+        "credits_debited": credits_debited,  # for refund on failure
+        "credits_refunded": False,
     }
     save_jobs(JOBS)
     Thread(target=multi_scene_worker, args=(job_id, ref_url), daemon=True).start()

@@ -22,9 +22,9 @@
         <ul class="nav-tabs">
           <li><a href="#home" data-tab="home" class="active">Studio</a></li>
           <li><a href="#renders" data-tab="renders">Library</a></li>
-          <li><a href="#ideas" data-tab="ideas">Ideas</a></li>
-          <li><a href="#templates" data-tab="templates">Runtimes</a></li>
-          <li><a href="/pricing.html">Pricing</a></li>
+          <li><a href="#shelfIdeas" data-tab="ideas">Ideas</a></li>
+          <li><a href="#shelfTemplates" data-tab="templates">Runtimes</a></li>
+          <li><a href="/pricing.html" class="nav-external">Pricing</a></li>
         </ul>
         <div class="nav-right">
           <button class="nav-search" id="searchBtn" aria-label="Search">
@@ -130,7 +130,7 @@
       </section>
 
       <!-- Ideas to Try (curated prompts) -->
-      <section class="shelf" id="shelfIdeas" hidden>
+      <section class="shelf" id="shelfIdeas">
         <div class="shelf-head">
           <h2>Directors' picks</h2>
         </div>
@@ -138,7 +138,7 @@
       </section>
 
       <!-- Templates (duration presets styled as collections) -->
-      <section class="shelf" id="shelfTemplates" hidden>
+      <section class="shelf" id="shelfTemplates">
         <div class="shelf-head">
           <h2>Runtimes</h2>
         </div>
@@ -382,6 +382,37 @@
           <p class="submit-note auth-terms">
             By continuing you agree to our <a href="/terms.html">Terms</a> and <a href="/privacy.html">Privacy Policy</a>. Your renders are saved to your Google-linked account.
           </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Render Started confirmation — appears right after clicking Render -->
+    <div class="modal" id="renderStartedModal" hidden aria-hidden="true">
+      <div class="modal-backdrop" data-close></div>
+      <div class="modal-card render-started-card" role="dialog" aria-modal="true" aria-labelledby="renderStartedTitle">
+        <button class="modal-close" data-close aria-label="Close">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M6 18L18 6"/></svg>
+        </button>
+        <div class="render-started-body">
+          <div class="render-started-icon" aria-hidden="true">
+            <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M4 4h12l4 4v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z"/>
+              <path d="M22 7 12 13 2 7"/>
+            </svg>
+          </div>
+          <p class="composer-eyebrow">Render kicked off</p>
+          <h2 id="renderStartedTitle" class="composer-title">You can close this tab.</h2>
+          <p class="render-started-lead">
+            We'll email you at <b id="renderStartedEmail">your inbox</b> the moment your video is ready.
+          </p>
+          <ul class="render-started-facts">
+            <li><span class="fact-dot"></span>Renders take a while — usually <b id="renderStartedEta">3–10 minutes</b>, longer for long-form.</li>
+            <li><span class="fact-dot"></span>No need to stay on this page. The email includes a direct link to your video.</li>
+            <li><span class="fact-dot"></span>Progress is also visible in your Library any time you come back.</li>
+          </ul>
+          <div class="render-started-actions">
+            <button type="button" class="btn-primary" data-close>Got it</button>
+          </div>
         </div>
       </div>
     </div>
