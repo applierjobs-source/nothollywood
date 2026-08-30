@@ -1309,6 +1309,27 @@ def public_config():
     }
 
 
+@app.get("/api/_status/providers")
+def provider_status():
+    """Report which optional service providers are configured. Booleans only —
+    NEVER returns secret values. Safe to expose publicly so we and the user
+    can verify env-var wiring without shelling into Railway.
+    """
+    import franchise_ref as _fr
+    return {
+        "xai_api_key": bool(_fr.XAI_API_KEY),
+        "xai_model": _fr.XAI_MODEL if _fr.XAI_API_KEY else None,
+        "xai_image_model": _fr.XAI_IMAGE_MODEL if _fr.XAI_API_KEY else None,
+        "reapi_key": bool(API_KEY),
+        "public_origin": bool(PUBLIC_ORIGIN),
+        "resend_email": bool(os.environ.get("RESEND_API_KEY")),
+        "stripe": bool(os.environ.get("STRIPE_SECRET_KEY")),
+        "franchise_refs_cached": sorted([
+            p.stem for p in FRANCHISE_REFS.glob("*") if p.is_file()
+        ]),
+    }
+
+
 @app.post("/api/generate")
 async def generate(
     request: Request,
