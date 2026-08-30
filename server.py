@@ -112,6 +112,16 @@ PACKS = {
     "feature":     {"price_id": STRIPE_PRICE_FEATURE,     "credits": 1800, "dollars": 250},
     "blockbuster": {"price_id": STRIPE_PRICE_BLOCKBUSTER, "credits": 3600, "dollars": 500},
 }
+
+# Unlimited-credit user ids. These accounts skip the credit debit at
+# /api/generate time and are reported to the frontend with balance =
+# UNLIMITED_BALANCE so the credit widget renders "Unlimited" instead of
+# a number. Refunds are no-ops for these users.
+UNLIMITED_BALANCE = 10_000_000  # sentinel; anything >= this means unlimited
+UNLIMITED_CREDIT_USER_IDS = {
+    # zacharrow3@gmail.com (owner)
+    "c129c72f-8636-4ca4-a8cf-218112824261",
+}
 # ROOT is the directory this file lives in. Works in both dev and prod sandboxes.
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -1311,6 +1321,13 @@ def refund_credits_for_failed_job(job: dict) -> None:
     user_id = job.get("user_id")
     if not user_id:
         return
+    # Unlimited-credit accounts never debit in the first place, so there's
+    # nothing to refund. Guard here in case a legacy job predates the
+    # whitelist.
+    if user_id in UNLIMITED_CREDIT_USER_IDS:
+        job["credits_refunded"] = True
+        job["credits_refund_note"] = "unlimited account—no refund needed"
+        return
     try:
         ok, msg, _ = _adjust_credits_via_supabase(user_id, debit)
         job["credits_refunded"] = True
@@ -1492,6 +1509,10 @@ def get_credits(request: Request):
     if not claims:
         raise HTTPException(status_code=401, detail="sign in required")
     user_id = claims.get("sub", "")
+    # Unlimited-credit accounts always report the sentinel balance so the
+    # UI displays "Unlimited" regardless of what the DB row (if any) says.
+    if user_id in UNLIMITED_CREDIT_USER_IDS:
+        return {"balance": UNLIMITED_BALANCE, "unlimited": True}
     if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
         return {"balance": 0, "stub": True}
     r = requests.get(
@@ -1808,12 +1829,38 @@ async def generate(
     if resolution not in ("768P", "1080P"):
         raise HTTPException(400, "resolution must be 768P or 1080P")
 
+    # ── Reference-image gate ────────────────────────────────────────
+    # Every render must have a reference image. Users either upload one or
+    # pick one from the /api/plan candidate grid. Auto-resolve via DDG /
+    # Grok is now only used as a picker candidate, not as a silent
+    # fallback for a bare /api/generate call. Skip enforcement in
+    # AUTH_DISABLED mode so smoke tests still work.
+    if (
+        not AUTH_DISABLED
+        and reference is None
+        and not (chosen_ref_url and chosen_ref_url.startswith("http"))
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "reference_required",
+                "message": (
+                    "A reference image is required. Upload one, or pick a "
+                    "candidate from the show-reference step first."
+                ),
+            },
+        )
+
     # ── Credit gate ─────────────────────────────────────────────────
     # Debit BEFORE we do any expensive work. If the render fails we refund
     # in the worker's failure paths. Skipped in AUTH_DISABLED mode (no user).
+    # Whitelisted user_ids (staff / unlimited accounts) skip debit entirely
+    # so their balance can never deplete.
     render_cost = credit_cost_for(duration, resolution)
     credits_debited = 0
-    if user_id and SUPABASE_SERVICE_ROLE_KEY:
+    if user_id and user_id in UNLIMITED_CREDIT_USER_IDS:
+        print(f"[credits] unlimited-account render for {user_id} (skip debit)")
+    elif user_id and SUPABASE_SERVICE_ROLE_KEY:
         ok, msg, new_balance = _adjust_credits_via_supabase(user_id, -render_cost)
         if not ok:
             if "insufficient credits" in msg:

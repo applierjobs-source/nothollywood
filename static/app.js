@@ -216,10 +216,13 @@ async function refreshCredits() {
     if (!r.ok) return;
     const data = await r.json();
     const bal = Number(data.balance) || 0;
-    lastCreditsBalance = bal;
-    el.navCreditsValue.textContent = bal.toLocaleString();
+    const isUnlimited = !!data.unlimited;
+    // Unlimited accounts (staff / owner) display "Unlimited" instead of a
+    // number and treat the balance as effectively infinite so nothing gates.
+    lastCreditsBalance = isUnlimited ? Infinity : bal;
+    el.navCreditsValue.textContent = isUnlimited ? "Unlimited" : bal.toLocaleString();
     el.navCredits.hidden = false;
-    el.navCredits.classList.toggle("low", bal < 10);
+    el.navCredits.classList.toggle("low", !isUnlimited && bal < 10);
   } catch (err) {
     // Silent: keep the chip hidden if the endpoint is unreachable.
     console.warn("credits fetch failed", err);
@@ -683,6 +686,19 @@ el.previewBackBtn.addEventListener("click", () => {
 el.previewApproveBtn.addEventListener("click", async () => {
   if (!pendingPlan) return;
   const selected = el.previewRefs.querySelector(".preview-ref.selected");
+  // A reference image is required. If the user didn't have an upload
+  // already in the composer AND hasn't picked a candidate, stop them
+  // here with a friendly nudge rather than letting the backend 400.
+  if (!selected && !pendingUpload) {
+    alert("Pick a reference image before continuing. Tap one of the show stills, or go back and upload your own.");
+    // Softly highlight the picker so the user sees where to click.
+    if (el.previewRefs) {
+      el.previewRefs.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.previewRefs.classList.add("needs-pick");
+      setTimeout(() => el.previewRefs.classList.remove("needs-pick"), 1600);
+    }
+    return;
+  }
   const chosenRefUrl = selected ? selected.dataset.url : "";
   const editedScenes = Array.from(el.previewScenes.querySelectorAll("textarea"))
     .map((t) => t.value.trim())
@@ -725,6 +741,22 @@ async function submitGenerate({ prompt, duration, resolution, chosenRefUrl, chos
     closeModal(el.previewModal);
     setTimeout(() => openAuthModal("signin"), 200);
     throw new Error("session expired — sign in again");
+  }
+  if (r.status === 400) {
+    // Missing reference image (or other structured 400). Surface a
+    // human-readable message rather than a raw payload.
+    try {
+      const body = await r.json();
+      if (body && body.detail && body.detail.error === "reference_required") {
+        alert(body.detail.message || "A reference image is required.");
+        throw new Error("reference required");
+      }
+      if (body && typeof body.detail === "string") {
+        throw new Error(body.detail);
+      }
+    } catch (parseErr) {
+      if (parseErr && parseErr.message === "reference required") throw parseErr;
+    }
   }
   if (r.status === 402) {
     // Out of credits — send them to pricing rather than a generic error toast.
