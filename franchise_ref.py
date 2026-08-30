@@ -45,13 +45,12 @@ import requests
 # Env-driven service configuration. Every one is optional.
 # ---------------------------------------------------------------------------
 
-SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "").strip()
-# OpenAI images for AI-generated fallback ref (gpt-image-1 recommended).
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
-OPENAI_IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1").strip()
-# LLM for ambiguous title extraction. Grok already wired for prompt_expander.
+# The ONLY external service key we consume: xAI (Grok). One key covers both
+# title extraction (Grok chat) AND the AI image-generation fallback (Grok
+# Imagine). No other paid API keys required.
 XAI_API_KEY = os.environ.get("XAI_API_KEY", "").strip()
 XAI_MODEL = os.environ.get("XAI_MODEL", "grok-4-fast-non-reasoning").strip()
+XAI_IMAGE_MODEL = os.environ.get("XAI_IMAGE_MODEL", "grok-imagine-image-2.0").strip()
 
 REQUEST_TIMEOUT = 30  # seconds; keep single request cheap
 
@@ -271,51 +270,103 @@ def _download_and_validate(url: str, min_bytes: int = 20_000,
         return None
 
 
-def _search_cast_still_serpapi(title: str) -> Optional[tuple[bytes, str]]:
-    """Query SerpAPI Google Images for '<title> cast', return validated bytes
-    of the first candidate that downloads cleanly. Returns None on any failure.
+# DuckDuckGo image search is keyless. The catch: we have to scrape the vqd
+# token out of the HTML entrypoint, then hit i.js with it. This is the same
+# pattern DDG's own webapp uses; no auth involved. If DDG ever changes the
+# response shape this quietly returns None and we fall through to Grok
+# Imagine — no user-visible breakage.
+_DDG_HTML_URL = "https://duckduckgo.com/"
+_DDG_JSON_URL = "https://duckduckgo.com/i.js"
+_DDG_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+_DDG_VQD_PATTERNS = (
+    re.compile(r'vqd=([\d-]+)'),
+    re.compile(r'"vqd":"([\d-]+)"'),
+    re.compile(r"vqd=['\"]([\d-]+)['\"]"),
+)
+
+
+def _ddg_get_vqd(session: requests.Session, query: str) -> Optional[str]:
+    try:
+        r = session.get(
+            _DDG_HTML_URL,
+            params={"q": query, "iar": "images", "iax": "images", "ia": "images"},
+            timeout=REQUEST_TIMEOUT,
+        )
+        if r.status_code != 200:
+            return None
+        for pat in _DDG_VQD_PATTERNS:
+            m = pat.search(r.text)
+            if m:
+                return m.group(1)
+    except Exception as e:
+        print(f"[franchise_ref] ddg vqd exception ({type(e).__name__}): {e}")
+    return None
+
+
+def _search_cast_still_duckduckgo(title: str) -> Optional[tuple[bytes, str]]:
+    """Keyless DuckDuckGo image search for '<title> cast photo'. Returns bytes
+    of the first candidate that downloads and validates as a real image, or
+    None on any failure.
     """
-    if not SERPAPI_KEY:
+    session = requests.Session()
+    session.headers["User-Agent"] = _DDG_UA
+    vqd = _ddg_get_vqd(session, f"{title} cast photo")
+    if not vqd:
+        print(f"[franchise_ref] ddg: no vqd for '{title}'")
         return None
     try:
-        r = requests.get(
-            "https://serpapi.com/search.json",
+        r = session.get(
+            _DDG_JSON_URL,
             params={
-                "engine": "google_images",
+                "l": "us-en",
+                "o": "json",
                 "q": f"{title} cast photo",
-                "api_key": SERPAPI_KEY,
-                "num": 20,
-                # Prefer landscape group shots.
-                "tbs": "isz:l",
-                "safe": "active",
+                "vqd": vqd,
+                "f": ",,,,,",  # no filters
+                "p": "1",       # safe search on
             },
             timeout=REQUEST_TIMEOUT,
         )
         if r.status_code != 200:
-            print(f"[franchise_ref] serpapi http {r.status_code}: {r.text[:200]}")
+            print(f"[franchise_ref] ddg i.js http {r.status_code}")
             return None
         data = r.json()
     except Exception as e:
-        print(f"[franchise_ref] serpapi exception: {e}")
+        print(f"[franchise_ref] ddg i.js exception ({type(e).__name__}): {e}")
         return None
 
-    for hit in (data.get("images_results") or [])[:12]:
-        url = hit.get("original") or hit.get("thumbnail")
-        if not url or not url.startswith("http"):
+    results = data.get("results") or []
+    # Prefer landscape shots with reasonable resolution (600x400 min) —
+    # portrait single-actor shots make bad group references.
+    ranked = []
+    for hit in results[:25]:
+        url = hit.get("image")
+        w = int(hit.get("width") or 0)
+        h = int(hit.get("height") or 0)
+        if not url or not url.startswith("http") or w < 600 or h < 400:
             continue
+        # Landscape bonus: prefer w/h ratios closer to 16:9
+        ratio = w / max(h, 1)
+        score = -abs(ratio - 1.78) + (w / 10000.0)
+        ranked.append((score, url))
+    ranked.sort(reverse=True)
+
+    tried = 0
+    for _, url in ranked[:6]:
         got = _download_and_validate(url)
+        tried += 1
         if got:
-            print(f"[franchise_ref] serpapi selected: {url[:100]}")
+            print(f"[franchise_ref] ddg selected (try {tried}): {url[:100]}")
             return got
-    print(f"[franchise_ref] serpapi: no candidates validated for '{title}'")
+    print(f"[franchise_ref] ddg: {tried} candidates rejected for '{title}'")
     return None
 
 
 # ---------------------------------------------------------------------------
-# Step 4 (Option A): OpenAI image-generation fallback
+# Step 4 (Option A): Grok Imagine fallback (same xAI key used for text)
 # ---------------------------------------------------------------------------
 
-_OPENAI_CAST_PROMPT_TEMPLATE = (
+_XAI_CAST_PROMPT_TEMPLATE = (
     "Photorealistic wide-angle group photo of the main cast of the well-known "
     "TV show '{title}' in a signature setting from the show. All main "
     "characters visible together, natural expressions, wardrobe and hair "
@@ -325,31 +376,29 @@ _OPENAI_CAST_PROMPT_TEMPLATE = (
 )
 
 
-def _generate_cast_still_openai(title: str) -> Optional[tuple[bytes, str]]:
-    """Ask OpenAI image API to produce a photorealistic cast group shot. Uses
-    detailed physical description language rather than actor names. Returns
-    None on no key or any failure."""
-    if not OPENAI_API_KEY:
+def _generate_cast_still_xai(title: str) -> Optional[tuple[bytes, str]]:
+    """Ask Grok Imagine to produce a photorealistic cast group shot. Uses the
+    SAME xAI API key already required for prompt expansion — no extra key.
+    Returns None on no key or any failure."""
+    if not XAI_API_KEY:
         return None
-    prompt = _OPENAI_CAST_PROMPT_TEMPLATE.format(title=title)
     body = {
-        "model": OPENAI_IMAGE_MODEL,
-        "prompt": prompt,
-        "size": "1536x1024",  # 3:2 landscape, close to 16:9
+        "model": XAI_IMAGE_MODEL,
+        "prompt": _XAI_CAST_PROMPT_TEMPLATE.format(title=title),
         "n": 1,
     }
     try:
         r = requests.post(
-            "https://api.openai.com/v1/images/generations",
+            "https://api.x.ai/v1/images/generations",
             headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
                 "Content-Type": "application/json",
+                "Authorization": f"Bearer {XAI_API_KEY}",
             },
             data=json.dumps(body),
-            timeout=90,  # image gen can be slow
+            timeout=90,
         )
         if r.status_code != 200:
-            print(f"[franchise_ref] openai http {r.status_code}: {r.text[:200]}")
+            print(f"[franchise_ref] xai image http {r.status_code}: {r.text[:200]}")
             return None
         data = r.json()
         item = (data.get("data") or [{}])[0]
@@ -369,7 +418,7 @@ def _generate_cast_still_openai(title: str) -> Optional[tuple[bytes, str]]:
             return None
         return raw, ext
     except Exception as e:
-        print(f"[franchise_ref] openai exception: {e}")
+        print(f"[franchise_ref] xai image exception ({type(e).__name__}): {e}")
         return None
 
 
@@ -414,12 +463,13 @@ def resolve_franchise_ref(
                 "source": "cache",
             }
 
-    # Cache miss. Try search first (real still), then AI generation.
+    # Cache miss. Try DuckDuckGo image search first (real still, keyless),
+    # then Grok Imagine as fallback (same xAI key used for text).
     started = time.time()
-    got = _search_cast_still_serpapi(title)
+    got = _search_cast_still_duckduckgo(title)
     source = "search"
     if not got:
-        got = _generate_cast_still_openai(title)
+        got = _generate_cast_still_xai(title)
         source = "generated"
     if not got:
         print(f"[franchise_ref] no reference produced for title='{title}' "
