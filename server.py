@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 
 from auth import require_user, get_user
 from prompt_expander import expand_prompt
+from franchise_ref import resolve_franchise_ref
 
 # Provider: reAPI (unmoderated MiniMax H3 host).
 # Migrated from MiniMax direct on 2026-08-28. reAPI proxies to the same underlying H3
@@ -129,46 +130,13 @@ FRAMES.mkdir(exist_ok=True)
 FRANCHISE_REFS.mkdir(exist_ok=True)
 
 
-# Franchise reference pack: when a user prompt clearly references a known
-# named-cast show, we auto-attach a curated cast group photo as the initial
-# reference frame so scene 1 renders with the right faces. Frame-chaining
-# then locks those faces in for every subsequent scene. This is the ONLY
-# way to get recognizable named-cast likenesses out of MiniMax H3 — the
-# model won't accept real actor names in the prompt (content filter), and
-# text descriptions alone produce generic look-alikes.
-#
-# Slug → (filename in FRANCHISE_REFS/, list of prompt substrings to match).
-# Match is case-insensitive; the first franchise whose ANY keyword hits wins.
-FRANCHISE_REF_PACKS: list[tuple[str, str, tuple[str, ...]]] = [
-    ("seinfeld", "seinfeld.png", (
-        "seinfeld", "jerry seinfeld", "george costanza", "kramer",
-        "elaine benes", "monk's cafe", "monks cafe",
-    )),
-    ("the-office", "the-office.png", (
-        "the office", "michael scott", "dwight schrute", "jim halpert",
-        "pam beesly", "dunder mifflin",
-    )),
-]
-
-
-def pick_franchise_ref(prompt: str) -> str | None:
-    """If the prompt matches a known franchise AND we have a cast reference on
-    disk AND PUBLIC_ORIGIN is set, return the public https URL of that
-    reference. Otherwise return None so the caller falls back to normal
-    upload-or-nothing behavior.
-
-    Deliberately returns None in dev (no PUBLIC_ORIGIN) rather than a local
-    path — reAPI requires a fetchable https URL for first_frame_url.
-    """
-    if not PUBLIC_ORIGIN:
-        return None
-    p = (prompt or "").lower()
-    for slug, filename, keywords in FRANCHISE_REF_PACKS:
-        if any(kw in p for kw in keywords):
-            ref_path = FRANCHISE_REFS / filename
-            if ref_path.exists():
-                return f"{PUBLIC_ORIGIN}/static/franchise-refs/{filename}"
-    return None
+# Franchise reference-pack lookup lives in franchise_ref.py. Given a prompt
+# and PUBLIC_ORIGIN, it returns a dict {url, slug, title, source} pointing to
+# a cast reference frame. It reads the on-disk cache first (pre-committed
+# stills like seinfeld.png / the-office.png), then falls through to web
+# image search (SerpAPI), then AI image generation (OpenAI), caching each
+# result on disk under FRANCHISE_REFS/<slug>.<ext> for future runs. Every
+# subsystem is optional — missing keys just skip that step and fall through.
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -1392,14 +1360,26 @@ async def generate(
         # If PUBLIC_ORIGIN is unset (dev with no public URL), we silently drop
         # the reference. Better than sending a data URL that reAPI will reject.
     else:
-        # No user upload — see if the prompt names a franchise we have a cast
-        # reference for. This is what makes 'generate a Seinfeld episode' work:
-        # we hand MiniMax a curated group photo of the cast so scene 1 renders
-        # with recognizable faces, then frame-chain locks them in for the rest.
-        fr = pick_franchise_ref(prompt)
-        if fr:
-            ref_url = fr
-            ref_source = "franchise"
+        # No user upload — see if the prompt names ANY TV show or movie and
+        # produce a cast reference frame for it. Cache hit is fast; a cache
+        # miss can add ~5-30s (web image search, or ~20s OpenAI generation).
+        # Never blocks: on failure we simply run without a reference, same as
+        # if the user didn't mention any show at all.
+        info = resolve_franchise_ref(
+            prompt,
+            franchise_refs_dir=FRANCHISE_REFS,
+            public_origin=PUBLIC_ORIGIN,
+        )
+        if info:
+            ref_url = info["url"]
+            # source: cache | search | generated -- record as detail after
+            # a 'franchise' base tag so /api/_debug/jobs can distinguish.
+            ref_source = f"franchise:{info['source']}"
+            ref_title = info.get("title")
+            ref_slug = info.get("slug")
+        else:
+            ref_title = None
+            ref_slug = None
     JOBS[job_id] = {
         "id": job_id,
         "prompt": prompt.strip(),
@@ -1415,6 +1395,8 @@ async def generate(
         "user_email": user_email,
         "ref_source": ref_source,
         "ref_url": ref_url,
+        "ref_title": locals().get("ref_title"),
+        "ref_slug": locals().get("ref_slug"),
     }
     save_jobs(JOBS)
     Thread(target=multi_scene_worker, args=(job_id, ref_url), daemon=True).start()
