@@ -37,6 +37,7 @@ import re
 import time
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import requests
 
@@ -399,24 +400,83 @@ def search_candidates_duckduckgo(title: str, want: int = 6) -> list[dict]:
     return [item for _, item in ranked[:want]]
 
 
-def _search_cast_still_duckduckgo(title: str) -> Optional[tuple[bytes, str]]:
-    """Keyless DuckDuckGo image search for '<title> cast photo'. Returns bytes
-    of the first candidate that downloads and validates as a real image, or
-    None on any failure.
-    """
-    session = requests.Session()
-    session.headers["User-Agent"] = _DDG_UA
-    vqd = _ddg_get_vqd(session, f"{title} cast photo")
+# Domains that reliably return "every-character-ever" wallpapers or busy
+# collages instead of a clean promotional cast frame. We don't hard-ban
+# them — some titles ONLY have hits there — but we score them lower so a
+# clean promo image from a review/news site wins when both are available.
+_DDG_WALLPAPER_DOMAINS = (
+    "wallpaperaccess.com",
+    "wallpapercave.com",
+    "wallpapers.com",
+    "wallpapersden.com",
+    "hdqwalls.com",
+    "alphacoders.com",
+    "images4.alphacoders.com",
+    "images6.alphacoders.com",
+    "wallup.net",
+    "pxfuel.com",
+    "peakpx.com",
+    # Fandom wiki mirrors serve "every character ever" posters as their
+    # top image (Simpsons character wall, Family Guy character grids).
+    "wikia.nocookie.net",
+    "static.wikia.nocookie.net",
+    "img1.wikia.nocookie.net",
+    "vignette.wikia.nocookie.net",
+    # PNG cutout sites and ranker collages are also not real stills.
+    "pngimg.com",
+    "imgix.ranker.com",
+    "ranker.com",
+    "pinimg.com",
+    "i.pinimg.com",
+    # Etsy fan-merch grids/collages.
+    "etsystatic.com",
+    "i.etsystatic.com",
+)
+# Domains that tend to host clean promotional cast/character photos.
+_DDG_PROMO_DOMAINS = (
+    "tvseriesfinale.com",
+    "variety.com",
+    "hollywoodreporter.com",
+    "ew.com",
+    "tvinsider.com",
+    "nbc.com",
+    "foxnews.com",
+    "fox.com",
+    "amc.com",
+    "hbo.com",
+    "themarysue.com",
+    "slashfilm.com",
+    "gq.com",
+    "vulture.com",
+    "colliderimages.com",
+    "static1.colliderimages.com",
+    "static1.srcdn.com",  # ScreenRant CDN
+    "srcdn.com",
+    "image.tmdb.org",  # TMDB — always official promo
+    "tmdb.org",
+    "comicbook.com",
+    "cdn.mos.cms.futurecdn.net",
+    "nme.com",
+    "rollingstone.com",
+    "indiewire.com",
+    "relevantmagazine.com",
+)
+
+
+def _ddg_search_images(session: requests.Session, query: str) -> list[dict]:
+    """Run one DDG image search and return the raw results list. Empty on
+    any failure."""
+    vqd = _ddg_get_vqd(session, query)
     if not vqd:
-        print(f"[franchise_ref] ddg: no vqd for '{title}'")
-        return None
+        print(f"[franchise_ref] ddg: no vqd for query='{query}'")
+        return []
     try:
         r = session.get(
             _DDG_JSON_URL,
             params={
                 "l": "us-en",
                 "o": "json",
-                "q": f"{title} cast photo",
+                "q": query,
                 "vqd": vqd,
                 "f": ",,,,,",  # no filters
                 "p": "1",       # safe search on
@@ -424,35 +484,100 @@ def _search_cast_still_duckduckgo(title: str) -> Optional[tuple[bytes, str]]:
             timeout=REQUEST_TIMEOUT,
         )
         if r.status_code != 200:
-            print(f"[franchise_ref] ddg i.js http {r.status_code}")
-            return None
-        data = r.json()
+            print(f"[franchise_ref] ddg i.js http {r.status_code} for '{query}'")
+            return []
+        return (r.json() or {}).get("results") or []
     except Exception as e:
-        print(f"[franchise_ref] ddg i.js exception ({type(e).__name__}): {e}")
+        print(f"[franchise_ref] ddg i.js exception for '{query}' ({type(e).__name__}): {e}")
+        return []
+
+
+def _search_cast_still_duckduckgo(title: str) -> Optional[tuple[bytes, str]]:
+    """Keyless DuckDuckGo image search for a clean cast/character frame.
+
+    Query cascade:
+      1. "<title> main characters"     (best signal for cartoons)
+      2. "<title> promotional photo"   (best signal for live-action)
+      3. "<title> cast photo"          (legacy fallback)
+
+    Scoring:
+      + width bonus
+      + closer-to-16:9 aspect bonus (posters are 2:3, wallpapers 21:9)
+      + boost for known promo domains
+      – penalty for wallpaper aggregators ("every character ever" posters)
+
+    Returns bytes of the first candidate that downloads and validates as a
+    real image, or None on any failure.
+    """
+    session = requests.Session()
+    session.headers["User-Agent"] = _DDG_UA
+
+    # Deduplicate hits across queries by URL so we don't retry the same
+    # candidate three times when the queries overlap.
+    seen_urls: set[str] = set()
+    all_hits: list[dict] = []
+    for query in (
+        f"{title} main characters",
+        f"{title} promotional photo",
+        f"{title} cast photo",
+    ):
+        hits = _ddg_search_images(session, query)
+        for hit in hits:
+            u = hit.get("image")
+            if not u or u in seen_urls:
+                continue
+            seen_urls.add(u)
+            all_hits.append(hit)
+
+    if not all_hits:
+        print(f"[franchise_ref] ddg: no hits across any query for '{title}'")
         return None
 
-    results = data.get("results") or []
-    # Prefer landscape shots with reasonable resolution (600x400 min) —
-    # portrait single-actor shots make bad group references.
-    ranked = []
-    for hit in results[:25]:
+    ranked: list[tuple[float, str]] = []
+    for hit in all_hits[:60]:  # examine more since we merged 3 queries
         url = hit.get("image")
         w = int(hit.get("width") or 0)
         h = int(hit.get("height") or 0)
         if not url or not url.startswith("http") or w < 600 or h < 400:
             continue
-        # Landscape bonus: prefer w/h ratios closer to 16:9
+
+        host = (urlparse(url).hostname or "").lower()
         ratio = w / max(h, 1)
-        score = -abs(ratio - 1.78) + (w / 10000.0)
+
+        # Aspect: reward 16:9 (1.78), tolerate 4:3 (1.33) and 3:2 (1.5).
+        # Penalize 21:9+ (wallpapers) and vertical posters.
+        aspect_score = -min(abs(ratio - 1.6), 1.5)  # peak near landscape
+        if ratio < 1.1:  # near-square or portrait — usually promo poster
+            aspect_score -= 0.4
+        if ratio > 2.2:  # ultra-wide wallpaper
+            aspect_score -= 0.6
+
+        size_score = min(w / 1600.0, 1.5)  # cap the reward at ~2400px wide
+
+        domain_score = 0.0
+        # Big penalty for wallpaper/fandom-wiki/PNG-cutout aggregators —
+        # their top-ranked "every character ever" images destroy MiniMax's
+        # ability to lock onto the main cast. Must be big enough to beat
+        # size bonuses for very wide (2000–4000px) wall posters.
+        if any(host.endswith(d) or host == d for d in _DDG_WALLPAPER_DOMAINS):
+            domain_score -= 2.0
+        if any(host.endswith(d) or host == d for d in _DDG_PROMO_DOMAINS):
+            domain_score += 1.0
+
+        score = aspect_score + size_score + domain_score
         ranked.append((score, url))
+
+    if not ranked:
+        print(f"[franchise_ref] ddg: no valid-size hits for '{title}'")
+        return None
     ranked.sort(reverse=True)
 
     tried = 0
-    for _, url in ranked[:6]:
+    for score, url in ranked[:8]:
         got = _download_and_validate(url)
         tried += 1
         if got:
-            print(f"[franchise_ref] ddg selected (try {tried}): {url[:100]}")
+            print(f"[franchise_ref] ddg selected (try {tried}, score={score:.2f}): {url[:100]}")
             return got
     print(f"[franchise_ref] ddg: {tried} candidates rejected for '{title}'")
     return None
@@ -686,17 +811,18 @@ def resolve_franchise_ref(
                 "source": "cache",
             }
 
-    # Cache miss. Try Grok signature-driven image generation first (most
-    # reliable path per testing — works for arbitrary shows without
-    # hardcoding). Fall back to DuckDuckGo image search only if Grok fails
-    # entirely (e.g., xAI outage or persistent moderation on a title we
-    # can't work around).
+    # Cache miss. Try DuckDuckGo image search FIRST — real show frames
+    # always look on-model (Rick with blue spiky hair, Morty in the yellow
+    # shirt, etc.), while Grok Imagine tends to drift when the show has
+    # very specific character designs. Fall back to Grok signature-driven
+    # generation only when DDG can't find a usable hit (new/niche titles,
+    # very obscure originals, or DDG returning nothing).
     started = time.time()
-    got = _generate_cast_still_xai(title)
-    source = "generated"
+    got = _search_cast_still_duckduckgo(title)
+    source = "search"
     if not got:
-        got = _search_cast_still_duckduckgo(title)
-        source = "search"
+        got = _generate_cast_still_xai(title)
+        source = "generated"
     if not got:
         print(f"[franchise_ref] no reference produced for title='{title}' "
               f"slug='{slug}' after {time.time()-started:.1f}s")
