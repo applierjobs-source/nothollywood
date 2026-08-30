@@ -1458,6 +1458,75 @@ async def plan(
     }
 
 
+@app.post("/api/plan/regenerate_refs")
+async def regenerate_refs(
+    request: Request,
+    title: str = Form(...),
+    variant: str = Form(""),
+):
+    """Re-run the DDG image search with a variant query so users can request
+    fresh candidates when the initial set didn't have anything good.
+
+    Variant appended to the query: e.g. 'group photo', 'promo shot', 'still',
+    'poster'. Frontend rotates through these on repeated clicks.
+    """
+    if not AUTH_DISABLED and SUPABASE_URL:
+        require_user(request)
+    q = title.strip()
+    if not q:
+        raise HTTPException(400, "title is empty")
+    # Compose an alternate query so DDG returns a different set of hits.
+    alt_terms = {
+        "group": "group photo",
+        "promo": "promo photo",
+        "still": "promotional still",
+        "poster": "poster",
+        "scene": "scene",
+    }
+    suffix = alt_terms.get(variant, "cast")
+    # Bit of a hack: reach into franchise_ref by patching the query it builds.
+    # Simplest way — do a direct duplicate of the search logic here so the
+    # variant term flows through.
+    from franchise_ref import (
+        _DDG_UA,
+        _DDG_JSON_URL,
+        _ddg_get_vqd,
+        REQUEST_TIMEOUT,
+    )
+    import requests as _rq
+    session = _rq.Session()
+    session.headers["User-Agent"] = _DDG_UA
+    search_q = f"{q} {suffix}"
+    vqd = _ddg_get_vqd(session, search_q)
+    if not vqd:
+        return {"candidates": []}
+    try:
+        r = session.get(
+            _DDG_JSON_URL,
+            params={"l": "us-en", "o": "json", "q": search_q, "vqd": vqd,
+                    "f": ",,,,,", "p": "1"},
+            timeout=REQUEST_TIMEOUT,
+        )
+        data = r.json() if r.status_code == 200 else {}
+    except Exception:
+        data = {}
+    hits = data.get("results") or []
+    out = []
+    for hit in hits[:60]:
+        url = hit.get("image")
+        thumb = hit.get("thumbnail") or url
+        w = int(hit.get("width") or 0)
+        h = int(hit.get("height") or 0)
+        if not url or not url.startswith("http"):
+            continue
+        if w and h and (w < 320 or h < 180):
+            continue
+        out.append({"url": url, "width": w, "height": h, "thumbnail": thumb, "source": "search"})
+        if len(out) >= 6:
+            break
+    return {"candidates": out, "query_used": search_q}
+
+
 @app.get("/api/_status/providers")
 def provider_status():
     """Report which optional service providers are configured. Booleans only —

@@ -338,17 +338,28 @@ def search_candidates_duckduckgo(title: str, want: int = 6) -> list[dict]:
         return []
 
     results = data.get("results") or []
+    print(f"[franchise_ref] ddg returned {len(results)} raw candidates for '{title}'")
     ranked = []
-    for hit in results[:40]:
+    skipped_size = 0
+    skipped_url = 0
+    # Loosened threshold: 320x180 (widescreen thumbnail floor). The previous
+    # 600x400 cutoff was silently killing 80%+ of real hits because DDG's
+    # width/height fields report the thumbnail size, not the source image.
+    MIN_W, MIN_H = 320, 180
+    for hit in results[:60]:
         url = hit.get("image")
         thumb = hit.get("thumbnail") or url
         w = int(hit.get("width") or 0)
         h = int(hit.get("height") or 0)
-        if not url or not url.startswith("http") or w < 600 or h < 400:
+        if not url or not url.startswith("http"):
+            skipped_url += 1
             continue
-        ratio = w / max(h, 1)
-        # Score: closer to 16:9 wins, with a small resolution bonus.
-        score = -abs(ratio - 1.78) + (w / 20000.0)
+        if w and h and (w < MIN_W or h < MIN_H):
+            skipped_size += 1
+            continue
+        ratio = (w / max(h, 1)) if (w and h) else 1.78
+        # Score: closer to 16:9 wins, small resolution bonus if we have it.
+        score = -abs(ratio - 1.78) + (w / 20000.0 if w else 0.0)
         ranked.append((score, {
             "url": url,
             "width": w,
@@ -356,6 +367,8 @@ def search_candidates_duckduckgo(title: str, want: int = 6) -> list[dict]:
             "thumbnail": thumb,
         }))
     ranked.sort(reverse=True, key=lambda x: x[0])
+    print(f"[franchise_ref] kept {len(ranked)} candidates (skipped_url={skipped_url}, "
+          f"skipped_size={skipped_size}), returning top {min(want, len(ranked))}")
     return [item for _, item in ranked[:want]]
 
 

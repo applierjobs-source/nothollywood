@@ -87,6 +87,7 @@ const el = {
   previewRefSub: $("#previewRefSub"),
   previewRefEmpty: $("#previewRefEmpty"),
   previewScenes: $("#previewScenes"),
+  previewRegenBtn: $("#previewRegenBtn"),
   previewBackBtn: $("#previewBackBtn"),
   previewApproveBtn: $("#previewApproveBtn"),
 
@@ -554,7 +555,9 @@ function openPreview(plan) {
   }
 
   // Reference grid.
-  el.previewRefs.innerHTML = "";
+  // Show 'More options' button whenever we detected a show — lets users
+  // request fresh candidates if the first batch doesn't include anything good.
+  el.previewRegenBtn.hidden = !plan.title;
   const cands = plan.candidates || [];
   if (cands.length === 0) {
     el.previewRefEmpty.hidden = false;
@@ -562,7 +565,14 @@ function openPreview(plan) {
   } else {
     el.previewRefEmpty.hidden = true;
     el.previewRefs.hidden = false;
-    cands.forEach((c, idx) => {
+    renderRefTiles(cands);
+  }
+  renderStoryboard(plan);
+}
+
+function renderRefTiles(cands) {
+  el.previewRefs.innerHTML = "";
+  cands.forEach((c, idx) => {
       const div = document.createElement("div");
       div.className = "preview-ref";
       div.dataset.url = c.url;
@@ -580,9 +590,11 @@ function openPreview(plan) {
       });
       el.previewRefs.appendChild(div);
     });
-  }
+  // NB: storyboard rendered separately in renderStoryboard() so regenerate
+  // can refresh tiles without touching the storyboard.
+}
 
-  // Storyboard: one editable textarea per scene.
+function renderStoryboard(plan) {
   el.previewScenes.innerHTML = "";
   (plan.scene_prompts || []).forEach((text, idx) => {
     const dur = (plan.scenes_plan || [])[idx] || 6;
@@ -599,6 +611,39 @@ function openPreview(plan) {
     el.previewScenes.appendChild(div);
   });
 }
+
+// Rotate through DDG query variants each time user clicks 'More options'.
+const REGEN_VARIANTS = ["group", "promo", "still", "poster", "scene"];
+let regenCursor = 0;
+
+el.previewRegenBtn.addEventListener("click", async () => {
+  if (!pendingPlan || !pendingPlan.title) return;
+  const variant = REGEN_VARIANTS[regenCursor % REGEN_VARIANTS.length];
+  regenCursor += 1;
+  el.previewRegenBtn.disabled = true;
+  el.previewRegenBtn.classList.add("spinning");
+  try {
+    const fd = new FormData();
+    fd.append("title", pendingPlan.title);
+    fd.append("variant", variant);
+    const r = await authedFetch(`${API}/api/plan/regenerate_refs`, { method: "POST", body: fd });
+    if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`);
+    const data = await r.json();
+    const cands = data.candidates || [];
+    if (cands.length === 0) {
+      alert("No new options found for that variant. Try again for a different set.");
+    } else {
+      renderRefTiles(cands);
+      el.previewRefEmpty.hidden = true;
+      el.previewRefs.hidden = false;
+    }
+  } catch (err) {
+    alert("Could not fetch new options: " + (err.message || err));
+  } finally {
+    el.previewRegenBtn.disabled = false;
+    el.previewRegenBtn.classList.remove("spinning");
+  }
+});
 
 el.previewBackBtn.addEventListener("click", () => {
   closeModal(el.previewModal);
