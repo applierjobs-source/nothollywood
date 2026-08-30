@@ -1399,9 +1399,13 @@ async def plan(
 
     Auth: uses require_user like /api/generate.
     """
-    user_id, user_email = require_user(request)
-    del user_email  # not used
-    del user_id
+    # Auth gate identical to /api/generate. Skip in disabled-auth testing mode.
+    if not AUTH_DISABLED and SUPABASE_URL:
+        require_user(request)
+    elif SITE_PASSWORD:
+        supplied = request.headers.get("X-Site-Password", "")
+        if supplied != SITE_PASSWORD:
+            raise HTTPException(401, "password required or incorrect")
     if not prompt.strip():
         raise HTTPException(400, "prompt is empty")
     if duration < 4 or duration > 600:
