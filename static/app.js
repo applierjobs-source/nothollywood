@@ -303,14 +303,36 @@ function updateEstimate() {
   const perSec = res === "1080P" ? 0.13 : 0.08;
   const cost = d * perSec;
   const scenes = sceneCount(d);
-  const waitMin = Math.max(2, scenes * 1.5);
-  const waitMax = Math.max(3, scenes * 3);
-  const stitchOverhead = scenes > 1 ? 0.5 : 0;
+  // Per-scene MiniMax H3 render time from observed reAPI jobs:
+  //   768P: ~40s low / ~80s high per scene
+  //   1080P: ~70s low / ~140s high per scene
+  // Add ~4s per scene for download + a flat 8s ffmpeg concat when >1 scene.
+  const perSceneLow = res === "1080P" ? 70 : 40;
+  const perSceneHigh = res === "1080P" ? 140 : 80;
+  const downloadPerScene = 4;
+  const stitchOverhead = scenes > 1 ? 8 : 0;
+  const totalLowSec = scenes * (perSceneLow + downloadPerScene) + stitchOverhead;
+  const totalHighSec = scenes * (perSceneHigh + downloadPerScene) + stitchOverhead;
   el.estCost.textContent = `$${cost.toFixed(2)}`;
-  const total = scenes === 1
-    ? `${Math.round(waitMin)}, ${Math.round(waitMax)} min`
-    : `${Math.round(waitMin + stitchOverhead)}, ${Math.round(waitMax + stitchOverhead)} min`;
-  el.estWait.textContent = total;
+  el.estWait.textContent = formatWaitRange(totalLowSec, totalHighSec);
+}
+// Format a wait-time range into human-readable text. Picks the unit that
+// keeps both numbers small and uses an en dash so it never reads as
+// "203,406 minutes" (see: prior bug where a comma looked like a thousands
+// separator on a 22-min movie).
+function formatWaitRange(lowSec, highSec) {
+  const pickUnit = (sec) => {
+    if (sec < 90) return { v: Math.round(sec), u: "sec" };
+    if (sec < 5400) return { v: Math.round(sec / 60), u: "min" };
+    return { v: Math.round(sec / 360) / 10, u: "hr" };
+  };
+  // Use whichever unit works for the HIGH end so the range never straddles.
+  const hi = pickUnit(highSec);
+  const lo = hi.u === "sec" ? { v: Math.round(lowSec), u: "sec" }
+          : hi.u === "min" ? { v: Math.max(1, Math.round(lowSec / 60)), u: "min" }
+          : { v: Math.max(0.1, Math.round(lowSec / 360) / 10), u: "hr" };
+  const label = hi.u === "hr" ? "hr" : hi.u === "min" ? "min" : "sec";
+  return `${lo.v}\u2013${hi.v} ${label}`;
 }
 
 // ─── Composer: file drop ───────────────────────────────────────────
