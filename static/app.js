@@ -827,6 +827,31 @@ function renderHero() {
     el.heroVideo.src = heroClip;
     el.heroVideo.load();
   }
+  // iOS Safari won't autoplay unless we explicitly call play() after load,
+  // and the element must be muted + playsinline (both set in the markup).
+  // Wrap in a try/catch: some browsers reject the promise on gesture policy
+  // violations, and we don't want an unhandled rejection.
+  el.heroVideo.muted = true;
+  el.heroVideo.playsInline = true;
+  el.heroVideo.setAttribute("playsinline", "");
+  el.heroVideo.setAttribute("webkit-playsinline", "");
+  const tryPlay = () => {
+    const p = el.heroVideo.play();
+    if (p && typeof p.catch === "function") p.catch(() => {});
+  };
+  tryPlay();
+  // If the browser refused (common on iOS when the video isn't loaded yet),
+  // retry once the browser signals it can play.
+  el.heroVideo.addEventListener("canplay", tryPlay, { once: true });
+  // And retry on the first user gesture anywhere on the page — tap, scroll,
+  // or touch — which unlocks autoplay for the rest of the session.
+  const gestureUnlock = () => {
+    tryPlay();
+    ["touchstart", "click", "scroll"].forEach(ev =>
+      document.removeEventListener(ev, gestureUnlock, { capture: true }));
+  };
+  ["touchstart", "click", "scroll"].forEach(ev =>
+    document.addEventListener(ev, gestureUnlock, { capture: true, once: true, passive: true }));
   el.heroPlayBtn.querySelector("span").textContent = "Create a Show";
   el.heroPlayBtn.onclick = () => openComposer();
 }
@@ -1241,7 +1266,10 @@ const TEMPLATES = [
   { value: "1", unit: "min", desc: "Six scenes stitched. A cold open or short skit.", pre: 60 },
   { value: "3", unit: "min", desc: "18 scenes. A full short film beat.", pre: 180 },
   { value: "5", unit: "min", desc: "30 scenes. TV pilot cold open territory.", pre: 300 },
-  { value: "10", unit: "min", desc: "60 scenes. A full sitcom episode. Big spend.", pre: 600 },
+  { value: "10", unit: "min", desc: "60 scenes. A full sitcom episode.", pre: 600 },
+  { value: "20", unit: "min", desc: "120 scenes. Half-hour sitcom without ads.", pre: 1200 },
+  { value: "30", unit: "min", desc: "180 scenes. A full network-length episode.", pre: 1800 },
+  { value: "1", unit: "hr", desc: "360 scenes. A drama-length episode. Max runtime.", pre: 3600 },
 ];
 function renderTemplates() {
   el.templatesRow.innerHTML = TEMPLATES.map((t) => `
