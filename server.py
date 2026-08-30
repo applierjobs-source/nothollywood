@@ -135,6 +135,40 @@ SCENES.mkdir(exist_ok=True)
 FRAMES.mkdir(exist_ok=True)
 FRANCHISE_REFS.mkdir(exist_ok=True)
 
+# One-shot cache sweep: delete pre-v2 franchise ref files sitting in
+# Railway's persistent volume that were saved during the pre-DDG-priority
+# era when Grok Imagine's drifted outputs were the only fallback (Rick
+# with a beard, wrong Morty, etc).
+#
+# Preserved:
+#   - files with v2- prefix (current cache scheme)
+#   - files with chosen_ prefix (per-job user picks)
+#   - hand-picked baseline images committed in the repo (seinfeld.png,
+#     the-office.png). We identify these by name, since git-tracking info
+#     isn't reliable at runtime on Railway.
+_BAKED_IN_REFS = {"seinfeld.png", "the-office.png"}
+try:
+    _pruned = 0
+    for _p in FRANCHISE_REFS.glob("*"):
+        if not _p.is_file():
+            continue
+        _name = _p.name
+        if (
+            _name.startswith("v2-")
+            or _name.startswith("chosen_")
+            or _name in _BAKED_IN_REFS
+        ):
+            continue
+        try:
+            _p.unlink()
+            _pruned += 1
+        except Exception as _e:
+            print(f"[franchise_refs] prune failed for {_name}: {_e}")
+    if _pruned:
+        print(f"[franchise_refs] pruned {_pruned} pre-v2 cached refs on startup")
+except Exception as _e:
+    print(f"[franchise_refs] startup prune crashed: {_e}")
+
 
 # Franchise reference-pack lookup lives in franchise_ref.py. Given a prompt
 # and PUBLIC_ORIGIN, it returns a dict {url, slug, title, source} pointing to
@@ -1530,9 +1564,11 @@ async def plan(
         slug = _slugify_title(title)
         # Serve any pre-baked cache hit as the first option so users see
         # 'this is what we already have for this show' at the top.
+        # Only trust the v2-prefixed cache — pre-v2 unprefixed files are
+        # drifted Grok outputs from the pre-DDG-priority era.
         if PUBLIC_ORIGIN:
             for ext in ("png", "jpg", "webp"):
-                cached = FRANCHISE_REFS / f"{slug}.{ext}"
+                cached = FRANCHISE_REFS / f"v2-{slug}.{ext}"
                 if cached.exists() and cached.stat().st_size >= 5_000:
                     candidates.append({
                         "url": f"{PUBLIC_ORIGIN}/static/franchise-refs/{cached.name}",
@@ -1559,7 +1595,7 @@ async def plan(
                 got = _generate_cast_still_xai(title)
                 if got:
                     raw, ext = got
-                    fname = f"{slug}.{ext}"
+                    fname = f"v2-{slug}.{ext}"
                     dest = FRANCHISE_REFS / fname
                     dest.write_bytes(raw)
                     if PUBLIC_ORIGIN:

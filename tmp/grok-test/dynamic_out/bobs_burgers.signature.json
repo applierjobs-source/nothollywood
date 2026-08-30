@@ -1,0 +1,28 @@
+{
+  "kind": "animation",
+  "art_style": "simple hand-drawn 2D cartoon style with bold black outlines and flat colors",
+  "characters": [
+    {
+      "role": "dad",
+      "look": "middle-aged man with short black hair, thick mustache, wearing a white apron over a light blue shirt"
+    },
+    {
+      "role": "mom",
+      "look": "woman with voluminous red curly hair, round glasses, wearing a green dress"
+    },
+    {
+      "role": "teenage daughter",
+      "look": "tall girl with brown hair in a ponytail, square glasses, blue skirt and yellow top"
+    },
+    {
+      "role": "young son",
+      "look": "boy with short black hair, wearing yellow shirt, blue pants and large headphones"
+    },
+    {
+      "role": "young daughter",
+      "look": "small girl with black bob haircut, wearing pink bunny-ear hat and green dress"
+    }
+  ],
+  "setting": "modest family burger restaurant interior with wooden counter, stools, and visible kitchen area",
+  "vibe": "quirky comedic tone with bright saturated colors and warm everyday lighting"
+}

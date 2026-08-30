@@ -305,7 +305,22 @@ def _ddg_get_vqd(session: requests.Session, query: str) -> Optional[str]:
 
 
 def _ddg_run_query(session: requests.Session, query: str) -> list[dict]:
-    """Single DDG image search. Returns raw results list or []. No ranking."""
+    """Single DDG image search. Returns raw results list or []. No ranking.
+
+    Tries the maintained `ddgs` PyPI library first — primp-backed TLS
+    impersonation works from cloud IPs where the raw i.js endpoint is
+    rate-limited or blocked. Falls back to the raw HTTP flow if the
+    library import or call fails.
+    """
+    try:
+        from ddgs import DDGS  # type: ignore
+        with DDGS() as ddgs:
+            hits = list(ddgs.images(query, max_results=30))
+            if hits:
+                return hits
+    except Exception as e:
+        print(f"[franchise_ref] ddgs.images fallback for '{query}' ({type(e).__name__}): {e}")
+
     vqd = _ddg_get_vqd(session, query)
     if not vqd:
         return []

@@ -1,0 +1,28 @@
+{
+  "kind": "live-action",
+  "art_style": "handheld documentary-style cinematography with natural office lighting, occasional zooms, and minimal polish",
+  "characters": [
+    {
+      "role": "boss",
+      "look": "balding middle-aged man with a slight paunch, wearing ill-fitting suits and ties"
+    },
+    {
+      "role": "assistant",
+      "look": "tall thin man with short brown hair, wearing button-down shirts, ties, and slacks, often with a stern expression"
+    },
+    {
+      "role": "receptionist",
+      "look": "young woman with shoulder-length brown hair, wearing cardigans, blouses, and casual office skirts"
+    },
+    {
+      "role": "salesman",
+      "look": "average-build man with dark hair, wearing dress shirts and khakis"
+    },
+    {
+      "role": "accountant",
+      "look": "petite woman with dark curly hair and glasses, wearing sweaters and professional slacks"
+    }
+  ],
+  "setting": "open-plan office with beige cubicles, cluttered desks, fluorescent ceiling lights, and a small conference room",
+  "vibe": "awkward mockumentary tone with muted everyday color palette, realistic lighting, and shaky-cam realism"
+}

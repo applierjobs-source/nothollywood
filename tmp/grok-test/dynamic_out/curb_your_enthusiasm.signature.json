@@ -1,0 +1,24 @@
+{
+  "kind": "live-action",
+  "art_style": "handheld cinematic photography with natural lighting and realistic, unpolished details",
+  "characters": [
+    {
+      "role": "middle-aged man",
+      "look": "balding with short gray hair, slim build, prominent nose, wearing button-up shirts and khakis"
+    },
+    {
+      "role": "wife",
+      "look": "blonde woman in her forties, slender frame, wearing elegant casual tops and pants"
+    },
+    {
+      "role": "best friend",
+      "look": "overweight man with dark curly hair and beard, dressed in t-shirts and jeans"
+    },
+    {
+      "role": "neighbor",
+      "look": "middle-aged woman with dark shoulder-length hair, sturdy build, in everyday blouses and skirts"
+    }
+  ],
+  "setting": "suburban Los Angeles homes, restaurants, golf courses, and everyday city streets",
+  "vibe": "cringe comedy tone with natural daylight, muted realistic colors, and documentary-style handheld camerawork"
+}

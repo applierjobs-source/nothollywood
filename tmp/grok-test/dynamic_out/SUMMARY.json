@@ -1,0 +1,44 @@
+[
+  {
+    "show": "The Simpsons",
+    "step": "image",
+    "status": "BLOCK",
+    "err": "http 400: {\"code\":\"imagine:content-moderated\",\"error\":\"Generated image rejected by content moderation.\",\"usage\":{\"cost_in_usd_ticks\":400000000}}"
+  },
+  {
+    "show": "Family Guy",
+    "step": "download",
+    "status": "DL-FAIL",
+    "url": "https://imgen.x.ai/xai-imgen/xai-tmp-imgen-11cba298-27a2-99b5-ae1f-7ab17726265c-018ece69.jpeg"
+  },
+  {
+    "show": "The Office",
+    "step": "download",
+    "status": "DL-FAIL",
+    "url": "https://imgen.x.ai/xai-imgen/xai-tmp-imgen-ceae8920-481e-94e9-b068-22eb8f36c6a1-040ee1b0.jpeg"
+  },
+  {
+    "show": "Rick and Morty",
+    "step": "download",
+    "status": "DL-FAIL",
+    "url": "https://imgen.x.ai/xai-imgen/xai-tmp-imgen-e672136e-0185-9c54-840b-006c84f0a5f3-3bdda680.jpeg"
+  },
+  {
+    "show": "South Park",
+    "step": "download",
+    "status": "DL-FAIL",
+    "url": "https://imgen.x.ai/xai-imgen/xai-tmp-imgen-6605734f-3fbd-9926-a469-ab163cad885d-139b4c76.jpeg"
+  },
+  {
+    "show": "Bob's Burgers",
+    "step": "download",
+    "status": "DL-FAIL",
+    "url": "https://imgen.x.ai/xai-imgen/xai-tmp-imgen-fcdaa6de-7aca-97d8-b9c8-d6ef942b3490-c29ded0d.jpeg"
+  },
+  {
+    "show": "Curb Your Enthusiasm",
+    "step": "download",
+    "status": "DL-FAIL",
+    "url": "https://imgen.x.ai/xai-imgen/xai-tmp-imgen-a1fccd5b-999e-9ace-ba1a-b531f10d9d10-45379498.jpeg"
+  }
+]
