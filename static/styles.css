@@ -443,6 +443,11 @@ body::before {
   box-shadow: 0 0 0 1px rgba(255,255,255,0.6), 0 16px 40px -12px rgba(255,255,255,0.4);
 }
 @media (max-width: 720px) {
+  .cta-band {
+    /* The -60px overlap looks great on desktop but on mobile it covers
+       the hero's own "Create a Show" button. Add breathing room instead. */
+    margin-top: 24px;
+  }
   .cta-band-inner {
     flex-direction: column;
     align-items: flex-start;
