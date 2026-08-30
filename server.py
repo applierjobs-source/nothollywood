@@ -1466,6 +1466,31 @@ async def plan(
             c["source"] = "search"
             candidates.append(c)
 
+        # Fallback: if DDG returned nothing (common for animated/cartoon
+        # shows like Rick and Morty, Family Guy, The Simpsons where DDG's
+        # image results are anemic), generate a cast still with Grok
+        # Imagine and add it as the sole candidate. Slow (~10s), so only
+        # runs when we have zero real search hits.
+        if not candidates:
+            try:
+                from franchise_ref import _generate_cast_still_xai
+                got = _generate_cast_still_xai(title)
+                if got:
+                    raw, ext = got
+                    fname = f"{slug}.{ext}"
+                    dest = FRANCHISE_REFS / fname
+                    dest.write_bytes(raw)
+                    if PUBLIC_ORIGIN:
+                        candidates.append({
+                            "url": f"{PUBLIC_ORIGIN}/static/franchise-refs/{fname}",
+                            "thumbnail": f"{PUBLIC_ORIGIN}/static/franchise-refs/{fname}",
+                            "width": 0,
+                            "height": 0,
+                            "source": "generated",
+                        })
+            except Exception as e:
+                print(f"[/api/plan] xai fallback failed for '{title}': {e}")
+
     # Storyboard: run the prompt expander now so the user sees the actual
     # per-scene prompts and can edit them before render.
     expansion = expand_prompt(prompt, scenes_plan)

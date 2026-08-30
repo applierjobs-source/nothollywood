@@ -303,18 +303,9 @@ def _ddg_get_vqd(session: requests.Session, query: str) -> Optional[str]:
     return None
 
 
-def search_candidates_duckduckgo(title: str, want: int = 6) -> list[dict]:
-    """Return up to `want` ranked candidate image URLs for '<title> cast photo'.
-
-    Each item: {"url": str, "width": int, "height": int, "thumbnail": str}.
-
-    Does NOT download the images — caller (usually the frontend) fetches them
-    directly. Cheaper and lets the UI show the picker in ~1 network round trip
-    from the backend perspective. Returns [] on any failure.
-    """
-    session = requests.Session()
-    session.headers["User-Agent"] = _DDG_UA
-    vqd = _ddg_get_vqd(session, f"{title} cast photo")
+def _ddg_run_query(session: requests.Session, query: str) -> list[dict]:
+    """Single DDG image search. Returns raw results list or []. No ranking."""
+    vqd = _ddg_get_vqd(session, query)
     if not vqd:
         return []
     try:
@@ -323,7 +314,7 @@ def search_candidates_duckduckgo(title: str, want: int = 6) -> list[dict]:
             params={
                 "l": "us-en",
                 "o": "json",
-                "q": f"{title} cast photo",
+                "q": query,
                 "vqd": vqd,
                 "f": ",,,,,",
                 "p": "1",
@@ -332,13 +323,49 @@ def search_candidates_duckduckgo(title: str, want: int = 6) -> list[dict]:
         )
         if r.status_code != 200:
             return []
-        data = r.json()
+        return r.json().get("results") or []
     except Exception as e:
-        print(f"[franchise_ref] ddg candidates exception ({type(e).__name__}): {e}")
+        print(f"[franchise_ref] ddg query '{query}' exception ({type(e).__name__}): {e}")
         return []
 
-    results = data.get("results") or []
-    print(f"[franchise_ref] ddg returned {len(results)} raw candidates for '{title}'")
+
+def search_candidates_duckduckgo(title: str, want: int = 6) -> list[dict]:
+    """Return up to `want` ranked candidate image URLs for the given show.
+
+    Each item: {"url": str, "width": int, "height": int, "thumbnail": str}.
+
+    Tries a few query variations — "cast photo" works for live-action but
+    tanks on animation, so we try "characters" and the bare title too and
+    merge results. Does NOT download the images — caller fetches them
+    directly. Returns [] on any failure.
+    """
+    session = requests.Session()
+    session.headers["User-Agent"] = _DDG_UA
+
+    # Fire multiple queries in sequence and merge unique URLs. "cast photo"
+    # is best for live-action shows; "characters" beats it for animation;
+    # the bare title catches promo art / group shots. Stop early once we
+    # have enough hits to fill `want` after ranking.
+    queries = [
+        f"{title} cast photo",
+        f"{title} characters",
+        f"{title} promo poster",
+    ]
+    results: list[dict] = []
+    seen_urls: set[str] = set()
+    for q in queries:
+        for hit in _ddg_run_query(session, q):
+            url = hit.get("image")
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            results.append(hit)
+        # Once we have plenty of raw hits, stop querying — saves ~1s per
+        # extra query. Ranking will trim to `want` anyway.
+        if len(results) >= 40:
+            break
+
+    print(f"[franchise_ref] ddg returned {len(results)} merged raw candidates for '{title}'")
     ranked = []
     skipped_size = 0
     skipped_url = 0
