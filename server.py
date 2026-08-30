@@ -23,6 +23,7 @@ from prompt_expander import expand_prompt
 from franchise_ref import (
     resolve_franchise_ref,
     extract_show_title,
+    extract_show_info,
     slugify as _slugify_title,
     search_candidates_duckduckgo,
     _download_and_validate,
@@ -1578,7 +1579,12 @@ async def plan(
     # Show detection. Skip candidate search on a miss and return an empty
     # candidates list; the frontend will render the storyboard with a
     # 'no reference required' banner and let the user hit Generate anyway.
-    title = extract_show_title(prompt)
+    # extract_show_info gives us kind + year so the picker doesn't pull
+    # anime/game fanart when the show name (e.g. 'Raymond') collides.
+    info = extract_show_info(prompt)
+    title = info[0] if info else None
+    kind = info[1] if info else "unknown"
+    year = info[2] if info else None
     candidates: list[dict] = []
     slug: str | None = None
     if title:
@@ -1600,8 +1606,9 @@ async def plan(
                     })
                     break
         # Then fetch 6 fresh DDG candidates (may add cached one for total of 7
-        # -- frontend can dedupe if it wants).
-        for c in search_candidates_duckduckgo(title, want=6):
+        # -- frontend can dedupe if it wants). Passing kind/year makes the
+        # picker use scoped queries + heavier fanart penalty for live-action.
+        for c in search_candidates_duckduckgo(title, want=6, kind=kind, year=year):
             c["source"] = "search"
             candidates.append(c)
 

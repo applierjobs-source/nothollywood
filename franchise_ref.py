@@ -76,38 +76,55 @@ from functools import lru_cache
 
 
 @lru_cache(maxsize=512)
-def _llm_extract_title(prompt: str) -> Optional[str]:
-    """Ask Grok to name the show if the prompt clearly references one.
+def _llm_extract_show_info(prompt: str) -> Optional[tuple[str, str, Optional[str]]]:
+    """Ask Grok to identify the show AND its production style.
 
-    Returns the canonical title (e.g. 'Everybody Loves Raymond') or
-    None when the prompt describes an original scene, references a
-    fictional show, or the API is unavailable. Never raises.
+    Returns (title, kind, year) tuple where:
+      title: canonical full title (e.g. 'Everybody Loves Raymond')
+      kind:  one of 'live-action', 'animated-2d', 'animated-3d',
+             'anime', 'stop-motion', 'unknown'
+      year:  premiere year as string (e.g. '1996') or None
 
-    Cached per exact prompt string so repeat /api/plan calls with the
-    same input skip the network round-trip entirely.
+    Returns None when prompt doesn't reference a real well-known show.
+    Never raises.
+
+    The kind and year let us build image-search queries that
+    disambiguate live-action shows from anime/game characters that
+    share names (e.g. 'Raymond' pulls anime fanart without
+    'sitcom 1996 CBS' scoping). Cached per exact prompt string.
     """
     if not XAI_API_KEY:
         return None
     system = (
-        "You extract a SINGLE TV show or movie title from a user's video-"
-        "generation prompt. If the prompt clearly references an existing "
-        "well-known TV show or movie by name, output the CANONICAL FULL "
-        "title. Otherwise output the exact string NONE.\n\n"
-        "Output rules:\n"
-        "- Just the canonical title, nothing else. No punctuation, no quotes.\n"
-        "- Full official title. NEVER truncate. 'everybody loves raymond' -> "
-        "'Everybody Loves Raymond', not 'Everybody'. 'elr' -> "
-        "'Everybody Loves Raymond'. 'the office' -> 'The Office'. "
-        "'seinfeld ep' -> 'Seinfeld'. 'curb' -> 'Curb Your Enthusiasm'.\n"
-        "- Case doesn't matter in the input. Always output canonical casing.\n"
+        "You identify a TV show or movie from a user's video-generation "
+        "prompt and return structured JSON. If the prompt clearly "
+        "references an existing well-known TV show or movie by name, "
+        "output a JSON object. Otherwise output the exact string NONE.\n\n"
+        "JSON schema:\n"
+        '  {"title": "<canonical full title>", '
+        '"kind": "<live-action|animated-2d|animated-3d|anime|stop-motion|unknown>", '
+        '"year": "<4-digit premiere year, or empty string>"}\n\n'
+        "Rules:\n"
+        "- Just the JSON object, nothing else. No markdown fence, no prose.\n"
+        "- title: full official title. NEVER truncate. 'everybody loves "
+        "raymond' -> 'Everybody Loves Raymond'. 'elr' -> 'Everybody Loves "
+        "Raymond'. 'the office' -> 'The Office'. 'seinfeld ep' -> 'Seinfeld'. "
+        "'curb' -> 'Curb Your Enthusiasm'. 'family guy' -> 'Family Guy'.\n"
+        "- Case in input doesn't matter. Output canonical casing.\n"
         "- No franchise expansion (Star Wars -> Star Wars, not A New Hope).\n"
+        "- kind: 'live-action' for sitcoms, dramas, reality; "
+        "'animated-2d' for Family Guy, Simpsons, South Park; "
+        "'animated-3d' for Pixar-style CG; "
+        "'anime' for Japanese anime; 'stop-motion' for Rankin/Bass; "
+        "'unknown' only if you truly can't tell.\n"
+        "- year: premiere year of the series/film, 4 digits, or \"\" if unknown.\n"
         "- If the prompt only describes an original scene, output NONE.\n"
-        "- If the show is fictional or made up by the user, output NONE.\n"
+        "- If the show is fictional/made up by the user, output NONE.\n"
         "- If ambiguous between shows, pick the most well-known one."
     )
     body = {
         "model": XAI_MODEL,
-        "max_tokens": 32,
+        "max_tokens": 80,
         "system": system,
         "messages": [{"role": "user", "content": prompt[:2000]}],
     }
@@ -123,39 +140,63 @@ def _llm_extract_title(prompt: str) -> Optional[str]:
             timeout=REQUEST_TIMEOUT,
         )
         if r.status_code != 200:
-            print(f"[franchise_ref] xai title extract http {r.status_code}: "
-                  f"{r.text[:200]}")
+            print(f"[franchise_ref] xai show-info http {r.status_code}: {r.text[:200]}")
             return None
         data = r.json()
-        # Skip thinking blocks, read the first text block.
         text = ""
         for block in data.get("content", []):
             if block.get("type") == "text":
                 text = (block.get("text") or "").strip()
                 break
-        text = text.strip().strip('"\'').strip()
+        text = text.strip()
         if not text or text.upper() == "NONE":
             return None
-        # Guard against long, chatty replies.
-        if len(text) > 80 or "\n" in text:
+        # Strip common wrappers Grok occasionally adds despite instructions.
+        text = text.strip("`").strip()
+        if text.startswith("json"):
+            text = text[4:].strip()
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            print(f"[franchise_ref] xai show-info non-JSON: {text[:200]}")
             return None
-        return text
+        title = (parsed.get("title") or "").strip().strip('"\'')
+        kind = (parsed.get("kind") or "unknown").strip().lower()
+        year = (parsed.get("year") or "").strip() or None
+        if not title or len(title) > 80 or "\n" in title:
+            return None
+        if kind not in {"live-action", "animated-2d", "animated-3d",
+                        "anime", "stop-motion", "unknown"}:
+            kind = "unknown"
+        if year and not (year.isdigit() and len(year) == 4):
+            year = None
+        return (title, kind, year)
     except Exception as e:  # pragma: no cover -- defensive
-        print(f"[franchise_ref] xai title extract exception: {e}")
+        print(f"[franchise_ref] xai show-info exception: {e}")
         return None
 
 
 def extract_show_title(prompt: str) -> Optional[str]:
-    """Return canonical show title or None.
-
-    Grok is the only extraction path. It handles arbitrary casing,
-    typos, abbreviations, and always returns the full canonical title.
-    Falls through to None only when XAI_API_KEY is unset or the API
-    call fails. Never raises.
+    """Return canonical show title or None. Thin wrapper for callers
+    that only need the title (auto-resolve path). New callers should
+    prefer extract_show_info() to also get kind + year for smarter
+    query construction. Never raises.
     """
     if not prompt:
         return None
-    return _llm_extract_title(prompt.strip())
+    info = _llm_extract_show_info(prompt.strip())
+    return info[0] if info else None
+
+
+def extract_show_info(prompt: str) -> Optional[tuple[str, str, Optional[str]]]:
+    """Return (title, kind, year) tuple or None. Preferred over
+    extract_show_title() because kind ('live-action' vs 'anime' etc.)
+    lets the picker build queries that disambiguate real cast photos
+    from fanart that shares a name. Never raises.
+    """
+    if not prompt:
+        return None
+    return _llm_extract_show_info(prompt.strip())
 
 
 # ---------------------------------------------------------------------------
@@ -299,28 +340,94 @@ def _ddg_run_query(session: requests.Session, query: str) -> list[dict]:
         return []
 
 
-def search_candidates_duckduckgo(title: str, want: int = 6) -> list[dict]:
+def _kind_queries(title: str, kind: str, year: Optional[str]) -> list[str]:
+    """Build image-search queries tuned to the show's production style.
+
+    Live-action shows are the tricky case because their titles/character
+    names collide with anime and game characters. Year + 'sitcom'/'TV
+    series' scoping filters most of that out at the query level, before
+    we even get to domain-based ranking. Animation/anime don't have this
+    problem because 'characters' + title returns the right frame.
+    """
+    year_suffix = f" {year}" if year else ""
+    if kind == "live-action":
+        return [
+            f"{title}{year_suffix} TV series cast photo",
+            f"{title} sitcom cast",
+            f"{title}{year_suffix} promotional still",
+        ]
+    if kind == "animated-2d":
+        return [
+            f"{title} main characters",
+            f"{title} animated series",
+            f"{title} promo art",
+        ]
+    if kind == "animated-3d":
+        return [
+            f"{title} main characters",
+            f"{title} CGI",
+            f"{title} promo art",
+        ]
+    if kind == "anime":
+        return [
+            f"{title} anime main characters",
+            f"{title} anime key visual",
+        ]
+    if kind == "stop-motion":
+        return [
+            f"{title} stop motion characters",
+            f"{title} promo",
+        ]
+    # unknown: hedge with generic queries
+    return [
+        f"{title}{year_suffix} cast photo",
+        f"{title} main characters",
+        f"{title} promo",
+    ]
+
+
+def _domain_score(host: str, kind: str) -> float:
+    """Shared domain-based scoring so picker and auto-resolve agree.
+
+    Live-action shows get a much heavier fan-art penalty because their
+    names frequently overlap with anime characters ('Raymond' the
+    VTuber, etc.). Anime/animation only get a light nudge — some real
+    anime promo art legitimately lives on DeviantArt/Pixiv.
+    """
+    score = 0.0
+    if any(host.endswith(d) or host == d or d in host for d in _DDG_WALLPAPER_DOMAINS):
+        score -= 2.0
+    if any(host.endswith(d) or host == d for d in _DDG_PROMO_DOMAINS):
+        score += 1.0
+    fanart_hit = any(host.endswith(d) or host == d or d in host
+                     for d in _DDG_FANART_DOMAINS)
+    if fanart_hit:
+        # Heavy penalty for live-action so anime/game fanart never wins.
+        # Light penalty for animation to still allow legit fan wikis.
+        score -= 3.5 if kind == "live-action" else 0.8
+    return score
+
+
+def search_candidates_duckduckgo(
+    title: str,
+    want: int = 6,
+    kind: str = "unknown",
+    year: Optional[str] = None,
+) -> list[dict]:
     """Return up to `want` ranked candidate image URLs for the given show.
 
     Each item: {"url": str, "width": int, "height": int, "thumbnail": str}.
 
-    Tries a few query variations — "cast photo" works for live-action but
-    tanks on animation, so we try "characters" and the bare title too and
-    merge results. Does NOT download the images — caller fetches them
-    directly. Returns [] on any failure.
+    Query set is tuned by `kind` (live-action / animated / anime) so
+    live-action shows don't pull anime fan-art with matching names.
+    Ranking combines aspect-ratio + resolution + domain scoring shared
+    with _search_cast_still_duckduckgo. Does NOT download the images —
+    caller fetches them directly. Returns [] on any failure.
     """
     session = requests.Session()
     session.headers["User-Agent"] = _DDG_UA
 
-    # Fire multiple queries in sequence and merge unique URLs. "cast photo"
-    # is best for live-action shows; "characters" beats it for animation;
-    # the bare title catches promo art / group shots. Stop early once we
-    # have enough hits to fill `want` after ranking.
-    queries = [
-        f"{title} cast photo",
-        f"{title} characters",
-        f"{title} promo poster",
-    ]
+    queries = _kind_queries(title, kind, year)
     results: list[dict] = []
     seen_urls: set[str] = set()
     for q in queries:
@@ -335,7 +442,8 @@ def search_candidates_duckduckgo(title: str, want: int = 6) -> list[dict]:
         if len(results) >= 40:
             break
 
-    print(f"[franchise_ref] ddg returned {len(results)} merged raw candidates for '{title}'")
+    print(f"[franchise_ref] ddg returned {len(results)} raw candidates for '{title}' "
+          f"(kind={kind}, year={year})")
     ranked = []
     skipped_size = 0
     skipped_url = 0
@@ -355,8 +463,11 @@ def search_candidates_duckduckgo(title: str, want: int = 6) -> list[dict]:
             skipped_size += 1
             continue
         ratio = (w / max(h, 1)) if (w and h) else 1.78
-        # Score: closer to 16:9 wins, small resolution bonus if we have it.
-        score = -abs(ratio - 1.78) + (w / 20000.0 if w else 0.0)
+        host = (urlparse(url).hostname or "").lower()
+        aspect_score = -abs(ratio - 1.78)
+        size_score = (w / 20000.0 if w else 0.0)
+        dscore = _domain_score(host, kind)
+        score = aspect_score + size_score + dscore
         ranked.append((score, {
             "url": url,
             "width": w,
@@ -400,6 +511,44 @@ _DDG_WALLPAPER_DOMAINS = (
     # Etsy fan-merch grids/collages.
     "etsystatic.com",
     "i.etsystatic.com",
+)
+# Fan-art / anime / game-image domains that pollute live-action searches
+# when a show/character name overlaps with an anime or game character
+# (e.g. 'Raymond' the sitcom vs 'Raymond' the VTuber/game character).
+# Heavy penalty when the show is live-action; small penalty otherwise.
+_DDG_FANART_DOMAINS = (
+    "deviantart.com",
+    "images-wixmp",  # DeviantArt CDN prefix
+    "pixiv.net",
+    "i.pximg.net",
+    "artstation.com",
+    "cdna.artstation.com",
+    "cdnb.artstation.com",
+    "danbooru.donmai.us",
+    "safebooru.org",
+    "gelbooru.com",
+    "zerochan.net",
+    "myanimelist.net",
+    "anilist.co",
+    "animenewsnetwork.com",
+    "cdn.myanimelist.net",
+    "crunchyroll.com",  # anime-only
+    "tumblr.com",
+    "media.tumblr.com",
+    "reddit.com",  # random subreddit crops, no editorial vetting
+    "i.redd.it",
+    "preview.redd.it",
+    "external-preview.redd.it",
+    # VTuber / hololive / gacha character wikis and shops
+    "hololive.hololivepro.com",
+    "virtualyoutuber.fandom.com",
+    # Generic game / character image dumps
+    "gamepedia.com",
+    "steamusercontent.com",
+    "steamuserimages",
+    "cdn.akamai.steamstatic.com",
+    "nintendo.com",  # Nintendo game promo art
+    "nintendo-world.com",
 )
 # Domains that tend to host clean promotional cast/character photos.
 _DDG_PROMO_DOMAINS = (
@@ -487,19 +636,18 @@ def _ddg_search_images(session: requests.Session, query: str) -> list[dict]:
         return []
 
 
-def _search_cast_still_duckduckgo(title: str) -> Optional[tuple[bytes, str]]:
+def _search_cast_still_duckduckgo(
+    title: str,
+    kind: str = "unknown",
+    year: Optional[str] = None,
+) -> Optional[tuple[bytes, str]]:
     """Keyless DuckDuckGo image search for a clean cast/character frame.
 
-    Query cascade:
-      1. "<title> main characters"     (best signal for cartoons)
-      2. "<title> promotional photo"   (best signal for live-action)
-      3. "<title> cast photo"          (legacy fallback)
-
-    Scoring:
-      + width bonus
-      + closer-to-16:9 aspect bonus (posters are 2:3, wallpapers 21:9)
-      + boost for known promo domains
-      – penalty for wallpaper aggregators ("every character ever" posters)
+    Queries and domain scoring are tuned to the show's `kind` so
+    live-action shows (whose names often collide with anime/game
+    characters) don't return fanart. Uses the shared `_kind_queries()`
+    and `_domain_score()` helpers so this path and the picker path
+    agree on what a good hit looks like.
 
     Returns bytes of the first candidate that downloads and validates as a
     real image, or None on any failure.
@@ -511,11 +659,7 @@ def _search_cast_still_duckduckgo(title: str) -> Optional[tuple[bytes, str]]:
     # candidate three times when the queries overlap.
     seen_urls: set[str] = set()
     all_hits: list[dict] = []
-    for query in (
-        f"{title} main characters",
-        f"{title} promotional photo",
-        f"{title} cast photo",
-    ):
+    for query in _kind_queries(title, kind, year):
         hits = _ddg_search_images(session, query)
         for hit in hits:
             u = hit.get("image")
@@ -549,15 +693,10 @@ def _search_cast_still_duckduckgo(title: str) -> Optional[tuple[bytes, str]]:
 
         size_score = min(w / 1600.0, 1.5)  # cap the reward at ~2400px wide
 
-        domain_score = 0.0
-        # Big penalty for wallpaper/fandom-wiki/PNG-cutout aggregators —
-        # their top-ranked "every character ever" images destroy MiniMax's
-        # ability to lock onto the main cast. Must be big enough to beat
-        # size bonuses for very wide (2000–4000px) wall posters.
-        if any(host.endswith(d) or host == d for d in _DDG_WALLPAPER_DOMAINS):
-            domain_score -= 2.0
-        if any(host.endswith(d) or host == d for d in _DDG_PROMO_DOMAINS):
-            domain_score += 1.0
+        # Shared domain scoring: wallpaper penalty, promo boost, and
+        # fan-art / anime / game-image penalty. Live-action shows get
+        # a much heavier fan-art penalty than animation.
+        domain_score = _domain_score(host, kind)
 
         score = aspect_score + size_score + domain_score
         ranked.append((score, url))
@@ -785,9 +924,10 @@ def resolve_franchise_ref(
     if not prompt or not public_origin:
         return None
 
-    title = extract_show_title(prompt)
-    if not title:
+    info = extract_show_info(prompt)
+    if not info:
         return None
+    title, kind, year = info
 
     slug = slugify(title)
     if not slug:
@@ -820,7 +960,7 @@ def resolve_franchise_ref(
     # generation only when DDG can't find a usable hit (new/niche titles,
     # very obscure originals, or DDG returning nothing).
     started = time.time()
-    got = _search_cast_still_duckduckgo(title)
+    got = _search_cast_still_duckduckgo(title, kind=kind, year=year)
     source = "search"
     if not got:
         got = _generate_cast_still_xai(title)
