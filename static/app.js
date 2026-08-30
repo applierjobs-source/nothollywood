@@ -78,6 +78,18 @@ const el = {
   estCost: $("#estCost"),
   estWait: $("#estWait"),
 
+  // Preview & approval modal
+  previewModal: $("#previewModal"),
+  previewLoading: $("#previewLoading"),
+  previewBody: $("#previewBody"),
+  previewSubtitle: $("#previewSubtitle"),
+  previewRefs: $("#previewRefs"),
+  previewRefSub: $("#previewRefSub"),
+  previewRefEmpty: $("#previewRefEmpty"),
+  previewScenes: $("#previewScenes"),
+  previewBackBtn: $("#previewBackBtn"),
+  previewApproveBtn: $("#previewApproveBtn"),
+
   // Detail modal
   detailModal: $("#detailModal"),
   detailVideo: $("#detailVideo"),
@@ -453,6 +465,14 @@ el.dropZone.addEventListener("drop", (e) => {
 el.clearRefBtn.addEventListener("click", showDropEmpty);
 
 // ─── Submit ────────────────────────────────────────────────────────
+// ---- Two-stage render flow -----------------------------------------
+// Stage 1: user submits prompt → we call /api/plan for candidates+storyboard
+// Stage 2: user picks ref + edits scenes → we submit /api/generate
+//
+// pendingPlan holds the data between stages so the approval modal can render.
+let pendingPlan = null;
+let pendingUpload = null; // File object if user uploaded a reference
+
 el.renderForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const prompt = el.prompt.value.trim();
@@ -470,13 +490,6 @@ el.renderForm.addEventListener("submit", async (e) => {
     if (!ok) return;
   }
 
-  const fd = new FormData();
-  fd.append("prompt", prompt);
-  fd.append("duration", String(duration));
-  fd.append("resolution", document.querySelector('input[name="resolution"]:checked').value);
-  const f = el.refFile.files?.[0];
-  if (f) fd.append("reference", f);
-
   // Auth check: if the backend requires auth but the user isn't signed in,
   // close the composer and open the auth modal instead of submitting.
   if (authRequired && !currentUser) {
@@ -485,36 +498,175 @@ el.renderForm.addEventListener("submit", async (e) => {
     return;
   }
 
+  // Uploaded reference short-circuits the approval flow — user's own image
+  // already answers the "which reference?" question, and they wouldn't upload
+  // an image just to have us pick a different one for them.
+  const uploadedFile = el.refFile.files?.[0] || null;
+  if (uploadedFile) {
+    pendingUpload = uploadedFile;
+    pendingPlan = null;
+    await submitGenerate({ prompt, duration });
+    return;
+  }
+
+  // No upload → fetch preview data and show approval modal.
+  pendingUpload = null;
   el.submitBtn.disabled = true;
   const origLabel = el.submitBtn.querySelector(".btn-label").textContent;
-  el.submitBtn.querySelector(".btn-label").textContent = "Submitting…";
+  el.submitBtn.querySelector(".btn-label").textContent = "Building preview…";
 
   try {
-    const r = await authedFetch(`${API}/api/generate`, { method: "POST", body: fd });
+    const fd = new FormData();
+    fd.append("prompt", prompt);
+    fd.append("duration", String(duration));
+    const r = await authedFetch(`${API}/api/plan`, { method: "POST", body: fd });
     if (r.status === 401) {
       closeModal(el.composerModal);
       setTimeout(() => openAuthModal("signin"), 200);
       throw new Error("session expired — sign in again");
     }
     if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`);
-    const job = await r.json();
-    // Close composer, jump user to the "Now Rendering" shelf
+    pendingPlan = await r.json();
+    pendingPlan._prompt = prompt;
+    pendingPlan._duration = duration;
+    pendingPlan._resolution = document.querySelector('input[name="resolution"]:checked').value;
     closeModal(el.composerModal);
-    el.prompt.value = "";
-    el.prompt.dispatchEvent(new Event("input"));
-    showDropEmpty();
-    setTimeout(() => {
-      refreshJobs().then(() => {
-        el.shelfActive.scrollIntoView({ behavior: "smooth", block: "start" });
-      });
-    }, 260);
+    openPreview(pendingPlan);
   } catch (err) {
-    alert("Show failed: " + (err.message || err));
+    alert("Preview failed: " + (err.message || err));
   } finally {
     el.submitBtn.disabled = false;
     el.submitBtn.querySelector(".btn-label").textContent = origLabel;
   }
 });
+
+function openPreview(plan) {
+  // Show modal in loading state briefly, then swap to body when populated.
+  openModal(el.previewModal);
+  el.previewLoading.hidden = true;
+  el.previewBody.hidden = false;
+
+  // Header: if we detected a show title, surface it in the subtitle.
+  if (plan.title) {
+    el.previewSubtitle.textContent = `We think this is a "${plan.title}" episode. Pick a cast reference or skip.`;
+  } else {
+    el.previewSubtitle.textContent = "Pick a reference frame (optional), then approve the storyboard.";
+  }
+
+  // Reference grid.
+  el.previewRefs.innerHTML = "";
+  const cands = plan.candidates || [];
+  if (cands.length === 0) {
+    el.previewRefEmpty.hidden = false;
+    el.previewRefs.hidden = true;
+  } else {
+    el.previewRefEmpty.hidden = true;
+    el.previewRefs.hidden = false;
+    cands.forEach((c, idx) => {
+      const div = document.createElement("div");
+      div.className = "preview-ref";
+      div.dataset.url = c.url;
+      div.dataset.idx = idx;
+      const src = c.thumbnail || c.url;
+      div.innerHTML = `
+        <img src="${src}" alt="reference ${idx + 1}" loading="lazy" referrerpolicy="no-referrer"
+             onerror="this.parentElement.style.display='none'" />
+        ${c.source === "cache" ? '<span class="badge">Saved</span>' : ""}
+        <span class="check">✓</span>
+      `;
+      div.addEventListener("click", () => {
+        el.previewRefs.querySelectorAll(".preview-ref").forEach((n) => n.classList.remove("selected"));
+        div.classList.add("selected");
+      });
+      el.previewRefs.appendChild(div);
+    });
+  }
+
+  // Storyboard: one editable textarea per scene.
+  el.previewScenes.innerHTML = "";
+  (plan.scene_prompts || []).forEach((text, idx) => {
+    const dur = (plan.scenes_plan || [])[idx] || 6;
+    const div = document.createElement("div");
+    div.className = "preview-scene";
+    div.innerHTML = `
+      <div class="preview-scene-head">
+        <span class="preview-scene-label">Scene ${idx + 1}</span>
+        <span class="preview-scene-dur">${dur}s</span>
+      </div>
+      <textarea data-idx="${idx}"></textarea>
+    `;
+    div.querySelector("textarea").value = text;
+    el.previewScenes.appendChild(div);
+  });
+}
+
+el.previewBackBtn.addEventListener("click", () => {
+  closeModal(el.previewModal);
+  // Restore the composer so the user can tweak their prompt.
+  setTimeout(() => openModal(el.composerModal), 200);
+});
+
+el.previewApproveBtn.addEventListener("click", async () => {
+  if (!pendingPlan) return;
+  const selected = el.previewRefs.querySelector(".preview-ref.selected");
+  const chosenRefUrl = selected ? selected.dataset.url : "";
+  const editedScenes = Array.from(el.previewScenes.querySelectorAll("textarea"))
+    .map((t) => t.value.trim())
+    .filter(Boolean);
+
+  el.previewApproveBtn.disabled = true;
+  const origLabel = el.previewApproveBtn.querySelector(".btn-label").textContent;
+  el.previewApproveBtn.querySelector(".btn-label").textContent = "Submitting…";
+
+  try {
+    await submitGenerate({
+      prompt: pendingPlan._prompt,
+      duration: pendingPlan._duration,
+      resolution: pendingPlan._resolution,
+      chosenRefUrl,
+      chosenScenes: editedScenes.length === pendingPlan.scenes_plan.length ? editedScenes : null,
+    });
+    closeModal(el.previewModal);
+    pendingPlan = null;
+  } catch (err) {
+    alert("Show failed: " + (err.message || err));
+  } finally {
+    el.previewApproveBtn.disabled = false;
+    el.previewApproveBtn.querySelector(".btn-label").textContent = origLabel;
+  }
+});
+
+async function submitGenerate({ prompt, duration, resolution, chosenRefUrl, chosenScenes }) {
+  const fd = new FormData();
+  fd.append("prompt", prompt);
+  fd.append("duration", String(duration));
+  fd.append("resolution", resolution || document.querySelector('input[name="resolution"]:checked').value);
+  if (pendingUpload) fd.append("reference", pendingUpload);
+  if (chosenRefUrl) fd.append("chosen_ref_url", chosenRefUrl);
+  if (chosenScenes) fd.append("chosen_scenes", JSON.stringify(chosenScenes));
+
+  const r = await authedFetch(`${API}/api/generate`, { method: "POST", body: fd });
+  if (r.status === 401) {
+    closeModal(el.composerModal);
+    closeModal(el.previewModal);
+    setTimeout(() => openAuthModal("signin"), 200);
+    throw new Error("session expired — sign in again");
+  }
+  if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`);
+  await r.json();
+
+  // Reset composer state and jump to "Now Rendering" shelf.
+  closeModal(el.composerModal);
+  el.prompt.value = "";
+  el.prompt.dispatchEvent(new Event("input"));
+  showDropEmpty();
+  pendingUpload = null;
+  setTimeout(() => {
+    refreshJobs().then(() => {
+      el.shelfActive.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }, 260);
+}
 
 // ─── Detail modal actions ──────────────────────────────────────────
 el.detailRemix.addEventListener("click", () => {

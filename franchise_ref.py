@@ -303,6 +303,62 @@ def _ddg_get_vqd(session: requests.Session, query: str) -> Optional[str]:
     return None
 
 
+def search_candidates_duckduckgo(title: str, want: int = 6) -> list[dict]:
+    """Return up to `want` ranked candidate image URLs for '<title> cast photo'.
+
+    Each item: {"url": str, "width": int, "height": int, "thumbnail": str}.
+
+    Does NOT download the images — caller (usually the frontend) fetches them
+    directly. Cheaper and lets the UI show the picker in ~1 network round trip
+    from the backend perspective. Returns [] on any failure.
+    """
+    session = requests.Session()
+    session.headers["User-Agent"] = _DDG_UA
+    vqd = _ddg_get_vqd(session, f"{title} cast photo")
+    if not vqd:
+        return []
+    try:
+        r = session.get(
+            _DDG_JSON_URL,
+            params={
+                "l": "us-en",
+                "o": "json",
+                "q": f"{title} cast photo",
+                "vqd": vqd,
+                "f": ",,,,,",
+                "p": "1",
+            },
+            timeout=REQUEST_TIMEOUT,
+        )
+        if r.status_code != 200:
+            return []
+        data = r.json()
+    except Exception as e:
+        print(f"[franchise_ref] ddg candidates exception ({type(e).__name__}): {e}")
+        return []
+
+    results = data.get("results") or []
+    ranked = []
+    for hit in results[:40]:
+        url = hit.get("image")
+        thumb = hit.get("thumbnail") or url
+        w = int(hit.get("width") or 0)
+        h = int(hit.get("height") or 0)
+        if not url or not url.startswith("http") or w < 600 or h < 400:
+            continue
+        ratio = w / max(h, 1)
+        # Score: closer to 16:9 wins, with a small resolution bonus.
+        score = -abs(ratio - 1.78) + (w / 20000.0)
+        ranked.append((score, {
+            "url": url,
+            "width": w,
+            "height": h,
+            "thumbnail": thumb,
+        }))
+    ranked.sort(reverse=True, key=lambda x: x[0])
+    return [item for _, item in ranked[:want]]
+
+
 def _search_cast_still_duckduckgo(title: str) -> Optional[tuple[bytes, str]]:
     """Keyless DuckDuckGo image search for '<title> cast photo'. Returns bytes
     of the first candidate that downloads and validates as a real image, or

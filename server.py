@@ -20,7 +20,13 @@ from fastapi.staticfiles import StaticFiles
 
 from auth import require_user, get_user
 from prompt_expander import expand_prompt
-from franchise_ref import resolve_franchise_ref
+from franchise_ref import (
+    resolve_franchise_ref,
+    extract_show_title,
+    slugify as _slugify_title,
+    search_candidates_duckduckgo,
+    _download_and_validate,
+)
 
 # Provider: reAPI (unmoderated MiniMax H3 host).
 # Migrated from MiniMax direct on 2026-08-28. reAPI proxies to the same underlying H3
@@ -729,12 +735,14 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
     # Every scene starts from the same initial ref (the upload, if any).
     ref_url = initial_ref_data_url  # arg name is legacy; already a public https URL
 
-    # If the user did NOT upload a reference AND the prompt names a TV show or
-    # movie, resolve a cast reference frame now (cache hit is instant; DDG
-    # search or Grok Imagine may take a few seconds). This is intentionally
-    # done inside the worker thread so /api/generate stays fast. Failure just
-    # falls through to no-reference generation — same as before this feature.
-    if not ref_url:
+    # If the user did NOT upload a reference AND did NOT pick one from the
+    # /api/plan approval flow AND the prompt names a TV show or movie, resolve
+    # a cast reference frame now (cache hit is instant; DDG search or Grok
+    # Imagine may take a few seconds). This is intentionally done inside the
+    # worker thread so /api/generate stays fast. Failure just falls through to
+    # no-reference generation — same as before this feature.
+    # Skip when ref_source == 'chosen' (user already approved a pick).
+    if not ref_url and job.get("ref_source") != "chosen":
         try:
             info = resolve_franchise_ref(
                 prompt,
@@ -786,8 +794,24 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
     #     the style + character descriptions embedded inline
     # Falls back to the raw-prompt path if ANTHROPIC_API_KEY is unset or the
     # call fails; the render still works, just with lower character fidelity.
-    expansion = expand_prompt(prompt, scenes)
-    scene_prompts_expanded: list[str] = expansion["scenes"]
+    # If the user pre-approved scene prompts via /api/plan, skip re-expanding.
+    preapproved = job.get("preapproved_scene_prompts")
+    if preapproved and len(preapproved) == len(scenes):
+        scene_prompts_expanded: list[str] = list(preapproved)
+        expansion = {
+            "ok": True,
+            "scenes": scene_prompts_expanded,
+            "provider": "user-approved",
+            "latency_ms": 0,
+            "error": None,
+            "style": None,
+            "characters": None,
+            "notes": "scene prompts approved by user in preview step",
+        }
+    else:
+        expansion = expand_prompt(prompt, scenes)
+        scene_prompts_expanded = expansion["scenes"]
+
     _jobx = JOBS.get(job_id)
     if _jobx is not None:
         _jobx["expansion_status"] = "expanded" if expansion["ok"] else "fallback"
@@ -1361,6 +1385,75 @@ def public_config():
     }
 
 
+@app.post("/api/plan")
+async def plan(
+    request: Request,
+    prompt: str = Form(...),
+    duration: int = Form(...),
+):
+    """Preview step BEFORE generation: return the show we detected, a set of
+    candidate reference frames the user can pick from, and the storyboard
+    (per-scene prompts) the LLM would send to the video model. The user
+    approves or edits and then calls /api/generate with the chosen ref_url
+    and scenes.
+
+    Auth: uses require_user like /api/generate.
+    """
+    user_id, user_email = require_user(request)
+    del user_email  # not used
+    del user_id
+    if not prompt.strip():
+        raise HTTPException(400, "prompt is empty")
+    if duration < 4 or duration > 600:
+        raise HTTPException(400, "duration must be between 4 and 600 seconds")
+
+    scenes_plan = plan_scenes(duration)
+
+    # Show detection. Skip candidate search on a miss and return an empty
+    # candidates list; the frontend will render the storyboard with a
+    # 'no reference required' banner and let the user hit Generate anyway.
+    title = extract_show_title(prompt)
+    candidates: list[dict] = []
+    slug: str | None = None
+    if title:
+        slug = _slugify_title(title)
+        # Serve any pre-baked cache hit as the first option so users see
+        # 'this is what we already have for this show' at the top.
+        if PUBLIC_ORIGIN:
+            for ext in ("png", "jpg", "webp"):
+                cached = FRANCHISE_REFS / f"{slug}.{ext}"
+                if cached.exists() and cached.stat().st_size >= 5_000:
+                    candidates.append({
+                        "url": f"{PUBLIC_ORIGIN}/static/franchise-refs/{cached.name}",
+                        "thumbnail": f"{PUBLIC_ORIGIN}/static/franchise-refs/{cached.name}",
+                        "width": 0,
+                        "height": 0,
+                        "source": "cache",
+                    })
+                    break
+        # Then fetch 6 fresh DDG candidates (may add cached one for total of 7
+        # -- frontend can dedupe if it wants).
+        for c in search_candidates_duckduckgo(title, want=6):
+            c["source"] = "search"
+            candidates.append(c)
+
+    # Storyboard: run the prompt expander now so the user sees the actual
+    # per-scene prompts and can edit them before render.
+    expansion = expand_prompt(prompt, scenes_plan)
+    return {
+        "title": title,
+        "slug": slug,
+        "scenes_plan": scenes_plan,
+        "scene_prompts": expansion.get("scenes") or [prompt] * len(scenes_plan),
+        "expansion_ok": expansion.get("ok", False),
+        "expansion_provider": expansion.get("provider"),
+        "style": expansion.get("style"),
+        "characters": expansion.get("characters"),
+        "notes": expansion.get("notes"),
+        "candidates": candidates,
+    }
+
+
 @app.get("/api/_status/providers")
 def provider_status():
     """Report which optional service providers are configured. Booleans only —
@@ -1389,6 +1482,11 @@ async def generate(
     duration: int = Form(6),
     resolution: str = Form("768P"),
     reference: UploadFile | None = File(None),
+    # Two-stage approval flow: /api/plan returned candidates+storyboard, user
+    # picked one, and now hands us the pre-approved data. Both optional so the
+    # legacy single-step path (no preview) still works.
+    chosen_ref_url: str = Form(""),
+    chosen_scenes: str = Form(""),   # JSON array of scene prompt strings
 ):
     # Auth gate: require a signed-in Supabase user. Falls back to the legacy
     # shared password if SITE_PASSWORD is set (break-glass only).
@@ -1415,9 +1513,28 @@ async def generate(
     scenes_plan = plan_scenes(duration)
     job_id = uuid.uuid4().hex[:12]
 
+    # Pre-picked scenes from /api/plan approval step. Must be a JSON list of
+    # strings whose length matches scenes_plan or we reject and force the
+    # worker to re-expand. Better to fail loudly than silently mis-align.
+    preapproved_scene_prompts: list[str] | None = None
+    if chosen_scenes:
+        try:
+            parsed = json.loads(chosen_scenes)
+            if isinstance(parsed, list) and len(parsed) == len(scenes_plan) and all(
+                isinstance(s, str) and s.strip() for s in parsed
+            ):
+                preapproved_scene_prompts = [s.strip() for s in parsed]
+            else:
+                raise HTTPException(
+                    400,
+                    f"chosen_scenes must be a JSON array of {len(scenes_plan)} non-empty strings",
+                )
+        except json.JSONDecodeError:
+            raise HTTPException(400, "chosen_scenes is not valid JSON")
+
     # Save uploaded reference under /static/frames/ so reAPI can fetch it.
     ref_url: str | None = None
-    ref_source: str = "none"  # "upload" | "franchise" | "none"
+    ref_source: str = "none"  # "upload" | "franchise" | "chosen" | "none"
     if reference is not None:
         raw = await reference.read()
         if len(raw) > 8 * 1024 * 1024:
@@ -1432,11 +1549,28 @@ async def generate(
             ref_source = "upload"
         # If PUBLIC_ORIGIN is unset (dev with no public URL), we silently drop
         # the reference. Better than sending a data URL that reAPI will reject.
-    # NB: franchise-ref resolution used to happen here, synchronously. That
-    # kept the /api/generate request open for up to ~30s (LLM title extract +
-    # web image search + Grok Imagine fallback) which made the UI freeze on
-    # "submitting...". We now do it inside multi_scene_worker before scene 1
-    # so the HTTP handler returns immediately with a queued job.
+    elif chosen_ref_url and chosen_ref_url.startswith("http"):
+        # User picked a candidate in /api/plan. Try to download it to our own
+        # /static/franchise-refs/ so reAPI gets a URL we control (avoids CDN
+        # hotlink protection and 403s on third-party image URLs).
+        # If download fails we still pass the raw URL and hope reAPI can fetch
+        # it — worst case the render falls back to no-reference.
+        try:
+            result = _download_and_validate(chosen_ref_url)
+            if result is not None and PUBLIC_ORIGIN:
+                blob, ext = result
+                out = FRANCHISE_REFS / f"chosen_{job_id}.{ext}"
+                out.write_bytes(blob)
+                ref_url = f"{PUBLIC_ORIGIN}/static/franchise-refs/{out.name}"
+            else:
+                ref_url = chosen_ref_url  # last-resort passthrough
+        except Exception as e:  # noqa: BLE001
+            print(f"[generate] chosen_ref_url download failed: {e}")
+            ref_url = chosen_ref_url
+        ref_source = "chosen"
+    # NB: If no upload and no chosen_ref_url, the legacy path still applies:
+    # multi_scene_worker will call resolve_franchise_ref itself before scene 1
+    # so /api/generate stays fast.
     JOBS[job_id] = {
         "id": job_id,
         "prompt": prompt.strip(),
@@ -1452,6 +1586,7 @@ async def generate(
         "user_email": user_email,
         "ref_source": ref_source,
         "ref_url": ref_url,
+        "preapproved_scene_prompts": preapproved_scene_prompts,
     }
     save_jobs(JOBS)
     Thread(target=multi_scene_worker, args=(job_id, ref_url), daemon=True).start()

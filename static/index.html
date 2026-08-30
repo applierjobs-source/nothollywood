@@ -272,6 +272,59 @@
     </div>
 
     <!-- ═══════════════════════════════════════════════════════════════════
+         PREVIEW & APPROVAL MODAL
+         User picks a reference frame + reviews/edits scene prompts before
+         we spend money on video generation.
+         ═══════════════════════════════════════════════════════════════════ -->
+    <div class="modal" id="previewModal" hidden aria-hidden="true">
+      <div class="modal-backdrop" data-close></div>
+      <div class="modal-card composer-card preview-card" role="dialog" aria-modal="true" aria-labelledby="previewTitle">
+        <button class="modal-close" data-close aria-label="Close">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M6 18L18 6"/></svg>
+        </button>
+        <div class="composer-head">
+          <p class="composer-eyebrow">Review before rendering</p>
+          <h2 id="previewTitle" class="composer-title">Pick a look. Approve the storyboard.</h2>
+          <p class="composer-sub" id="previewSubtitle">Choose which reference frame anchors your cast, then confirm each scene's direction.</p>
+        </div>
+
+        <div id="previewLoading" class="preview-loading">
+          <div class="preview-spinner" aria-hidden="true"></div>
+          <p>Finding reference frames and writing your storyboard…</p>
+        </div>
+
+        <div id="previewBody" class="preview-body" hidden>
+          <section class="preview-section" id="previewRefSection">
+            <div class="preview-section-head">
+              <h3>Reference frame</h3>
+              <p class="preview-section-sub" id="previewRefSub">Click one to anchor the cast for every scene. Optional — skip to render without a reference.</p>
+            </div>
+            <div class="preview-refs" id="previewRefs"></div>
+            <p class="preview-empty" id="previewRefEmpty" hidden>
+              No cast frames found for this prompt. We'll render without a reference.
+            </p>
+          </section>
+
+          <section class="preview-section">
+            <div class="preview-section-head">
+              <h3>Storyboard</h3>
+              <p class="preview-section-sub">Edit any scene inline. Each becomes one shot.</p>
+            </div>
+            <div class="preview-scenes" id="previewScenes"></div>
+          </section>
+
+          <div class="preview-actions">
+            <button type="button" class="btn-secondary" id="previewBackBtn">Back to prompt</button>
+            <button type="button" class="btn-render" id="previewApproveBtn">
+              <span class="btn-label">Approve & render</span>
+              <span class="btn-arrow">→</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
          DETAIL MODAL (click a tile → full-screen play)
          ══════════════════════════════════════════════════════════════════ -->
     <div class="modal" id="detailModal" hidden aria-hidden="true">
