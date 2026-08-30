@@ -123,6 +123,31 @@ UNLIMITED_CREDIT_USER_IDS = {
     # zacharrow3@gmail.com (owner)
     "c129c72f-8636-4ca4-a8cf-218112824261",
 }
+# Emails on this list get unlimited credits the moment they sign up — no
+# manual whitelisting after the fact needed. Lowercased for case-insensitive
+# comparison. Both /api/credits and the /api/generate debit gate consult
+# this set alongside UNLIMITED_CREDIT_USER_IDS.
+UNLIMITED_CREDIT_EMAILS = {
+    "zacharrow3@gmail.com",
+    "lloydjarrow@gmail.com",
+    "johndavidarrow@gmail.com",
+}
+
+
+def _is_unlimited(user_id: str | None, user_email: str | None) -> bool:
+    """Return True if this user should skip credit debits.
+
+    Whitelist matches on user_id OR lowercased email so we can pre-whitelist
+    people (family, staff) before they've signed up and been issued a
+    Supabase UUID. As soon as their first login pushes an email claim into
+    the JWT, they're recognized as unlimited on the very first /api/credits
+    call.
+    """
+    if user_id and user_id in UNLIMITED_CREDIT_USER_IDS:
+        return True
+    if user_email and user_email.lower().strip() in UNLIMITED_CREDIT_EMAILS:
+        return True
+    return False
 # ROOT is the directory this file lives in. Works in both dev and prod sandboxes.
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -1325,6 +1350,10 @@ def refund_credits_for_failed_job(job: dict) -> None:
     # Unlimited-credit accounts never debit in the first place, so there's
     # nothing to refund. Guard here in case a legacy job predates the
     # whitelist.
+    # Refund guard: unlimited-by-user_id accounts couldn't have debited, but
+    # keep the note for legacy jobs. Email-whitelisted users also never debit,
+    # but their user_id is a normal UUID so we can't distinguish here; the
+    # debit==0 early-return above already handles them correctly.
     if user_id in UNLIMITED_CREDIT_USER_IDS:
         job["credits_refunded"] = True
         job["credits_refund_note"] = "unlimited account—no refund needed"
@@ -1510,9 +1539,12 @@ def get_credits(request: Request):
     if not claims:
         raise HTTPException(status_code=401, detail="sign in required")
     user_id = claims.get("sub", "")
+    user_email = claims.get("email", "") or ""
     # Unlimited-credit accounts always report the sentinel balance so the
     # UI displays "Unlimited" regardless of what the DB row (if any) says.
-    if user_id in UNLIMITED_CREDIT_USER_IDS:
+    # Email matches too, so pre-whitelisted family/staff show "Unlimited"
+    # from their first login without needing a manual user_id add.
+    if _is_unlimited(user_id, user_email):
         return {"balance": UNLIMITED_BALANCE, "unlimited": True}
     if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
         return {"balance": 0, "stub": True}
@@ -1865,8 +1897,8 @@ async def generate(
     # so their balance can never deplete.
     render_cost = credit_cost_for(duration, resolution)
     credits_debited = 0
-    if user_id and user_id in UNLIMITED_CREDIT_USER_IDS:
-        print(f"[credits] unlimited-account render for {user_id} (skip debit)")
+    if _is_unlimited(user_id, user_email):
+        print(f"[credits] unlimited-account render for {user_id or user_email} (skip debit)")
     elif user_id and SUPABASE_SERVICE_ROLE_KEY:
         ok, msg, new_balance = _adjust_credits_via_supabase(user_id, -render_cost)
         if not ok:
