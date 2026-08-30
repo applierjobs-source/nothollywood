@@ -464,6 +464,20 @@ def _download_video(url: str, out_path: Path) -> tuple[bool, str]:
         return False, f"download failed: {e}"
 
 
+# Poll intervals. Tighter = faster wall-clock because we detect completion
+# sooner. reAPI and Grok Imagine both tolerate rapid polling comfortably at
+# 3s. We also apply a mild backoff after the first minute since long-running
+# jobs are unlikely to complete on the very next poll and rapid polling only
+# helps near the end.
+POLL_FAST_S = 3      # first 60s of a scene
+POLL_SLOW_S = 5      # after 60s
+POLL_SWITCH_S = 60   # when to switch from fast to slow
+
+
+def _poll_interval(elapsed: float) -> float:
+    return POLL_FAST_S if elapsed < POLL_SWITCH_S else POLL_SLOW_S
+
+
 def _render_with_grok(
     scene_prompt: str,
     duration: int,
@@ -474,13 +488,17 @@ def _render_with_grok(
 ) -> tuple[bool, str]:
     """Grok Imagine fallback path. Mirrors _render_with_minimax's control flow."""
     on_status("grok_submitting")
+    submit_start = time.time()
     request_id, err = submit_grok(scene_prompt, duration, resolution, ref_data_url)
+    submit_took = time.time() - submit_start
     if not request_id:
         return False, err or "grok submit failed"
+    print(f"[render] grok submit ok request_id={request_id} in {submit_took:.1f}s")
     start = time.time()
     max_wait = 8 * 60
     while time.time() - start < max_wait:
-        time.sleep(10)
+        elapsed = time.time() - start
+        time.sleep(_poll_interval(elapsed))
         task = fetch_grok(request_id)
         status = task.get("status", "running")
         on_status(f"grok_{status}")
@@ -488,6 +506,7 @@ def _render_with_grok(
             url = (task.get("content") or {}).get("url")
             if not url:
                 return False, "grok returned no url"
+            print(f"[render] grok succeeded in {time.time()-start:.1f}s poll-time")
             return _download_video(url, scene_out_path)
         if status == "failed":
             return False, "grok: " + (task.get("error") or {}).get("message", "generation failed")
@@ -507,7 +526,9 @@ def render_one_scene(
     on_status(status: str) called periodically for UI updates.
     Returns (ok, error).
     """
+    submit_start = time.time()
     task_id, err = submit_h3(scene_prompt, duration, resolution, ref_data_url)
+    submit_took = time.time() - submit_start
     if not task_id:
         # Submit itself failed. If it's a sensitivity rejection, try Grok directly.
         if _is_sensitive_error(err or "") and GROK_API_KEY:
@@ -515,11 +536,15 @@ def render_one_scene(
                 scene_prompt, duration, resolution, ref_data_url, scene_out_path, on_status
             )
         return False, err or "submit failed"
+    print(f"[render] h3 submit ok task_id={task_id} in {submit_took:.1f}s")
 
     start = time.time()
     max_wait = 8 * 60
+    polls = 0
     while time.time() - start < max_wait:
-        time.sleep(15)
+        elapsed = time.time() - start
+        time.sleep(_poll_interval(elapsed))
+        polls += 1
         task = fetch_task(task_id)
         status = task.get("status", "running")
         on_status(status)
@@ -527,7 +552,11 @@ def render_one_scene(
             url = (task.get("content") or {}).get("url")
             if not url:
                 return False, "no url returned"
-            return _download_video(url, scene_out_path)
+            dl_start = time.time()
+            ok, msg = _download_video(url, scene_out_path)
+            print(f"[render] h3 succeeded poll_time={time.time()-start:.1f}s "
+                  f"polls={polls} download={time.time()-dl_start:.1f}s")
+            return ok, msg
         if status == "failed":
             mm_err = (task.get("error") or {}).get("message", "generation failed")
             # MiniMax refused for policy reasons - retry with Grok Imagine.
