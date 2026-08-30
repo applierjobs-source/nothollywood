@@ -43,16 +43,10 @@ const el = {
   navCredits: $("#navCredits"),
   navCreditsValue: $("#navCreditsValue"),
   authModal: $("#authModal"),
-  authForm: $("#authForm"),
-  authEmail: $("#authEmail"),
-  authPassword: $("#authPassword"),
   authError: $("#authError"),
-  authSubmitBtn: $("#authSubmitBtn"),
-  authSubmitLabel: $("#authSubmitLabel"),
   authTitle: $("#authTitle"),
   authSub: $("#authSub"),
-  authSwitchLine: $("#authSwitchLine"),
-  authPasswordHint: $("#authPasswordHint"),
+  googleSignInBtn: $("#googleSignInBtn"),
 
   ideasRow: $("#ideasRow"),
   templatesRow: $("#templatesRow"),
@@ -120,7 +114,7 @@ let sb = null;
 let currentUser = null;     // null when signed out; { id, email, ... } when signed in
 let authRequired = false;   // true when backend reports auth is configured
 let libraryRenders = [];    // durable renders fetched from /api/library (survive deploys)
-let authMode = "signin";    // "signin" | "signup"
+// (Google SSO is the only auth path now.)
 
 async function initAuth() {
   try {
@@ -154,11 +148,17 @@ async function initAuth() {
       currentUser = sessData.session.user;
     }
     // Subscribe to changes (sign-in, sign-out, token refresh).
-    sb.auth.onAuthStateChange((_event, session) => {
+    // SIGNED_IN fires after detectSessionInUrl parses the Google callback
+    // fragment, so this is where we resume the pending composer prompt.
+    sb.auth.onAuthStateChange((event, session) => {
       currentUser = session ? session.user : null;
       renderAuthUI();
       refreshJobs();
       refreshLibrary();
+      if (event === "SIGNED_IN" && currentUser) {
+        closeModal(el.authModal);
+        handleOAuthReturn();
+      }
     });
   } catch (err) {
     console.warn("auth init failed", err);
@@ -1410,133 +1410,78 @@ function startProgressTick() {
   }, 250);
 }
 
-// ─── Init ──────────────────────────────────────────────────────────
-// Auth modal wiring
-function openAuthModal(mode = "signin") {
-  setAuthMode(mode);
+// ─── Init ───────────────────────────────────────────────────────────
+// Auth modal wiring — Google SSO only.
+function openAuthModal() {
   el.authError.hidden = true;
   el.authError.textContent = "";
   openModal(el.authModal);
-  setTimeout(() => el.authEmail.focus(), 100);
 }
 
-function setAuthMode(mode) {
-  authMode = mode;
-  const tabs = el.authModal.querySelectorAll(".auth-tab");
-  tabs.forEach((t) => t.classList.toggle("active", t.dataset.authMode === mode));
-  if (mode === "signup") {
-    el.authTitle.textContent = "Create your account.";
-    el.authSub.textContent = "Your renders stay in your library. Nothing goes public.";
-    el.authSubmitLabel.textContent = "Create account";
-    el.authPassword.setAttribute("autocomplete", "new-password");
-    el.authPasswordHint.textContent = "At least 6 characters. Pick something memorable.";
-    el.authSwitchLine.innerHTML =
-      'Already have an account? <button type="button" class="link-btn" data-auth-switch="signin">Sign in</button>';
-  } else {
-    el.authTitle.textContent = "Sign in to Not Hollywood.";
-    el.authSub.textContent = "Welcome back. Pick up your library.";
-    el.authSubmitLabel.textContent = "Sign in";
-    el.authPassword.setAttribute("autocomplete", "current-password");
-    el.authPasswordHint.textContent = "At least 6 characters.";
-    el.authSwitchLine.innerHTML =
-      'New here? <button type="button" class="link-btn" data-auth-switch="signup">Create an account</button>';
-  }
-}
-
-el.navSignInBtn.addEventListener("click", () => openAuthModal("signin"));
+el.navSignInBtn.addEventListener("click", () => openAuthModal());
 el.navSignOutBtn.addEventListener("click", async () => {
   if (!sb) return;
   await sb.auth.signOut();
 });
 
-document.addEventListener("click", (e) => {
-  const tab = e.target.closest("[data-auth-mode]");
-  if (tab) {
-    setAuthMode(tab.dataset.authMode);
-    el.authError.hidden = true;
+// After the OAuth round-trip Supabase drops a `#access_token=...` fragment on
+// the URL and detectSessionInUrl parses it. We stash the pending composer
+// prompt in sessionStorage so a template/idea click that triggered the sign-in
+// survives the full-page redirect back from Google.
+async function signInWithGoogle() {
+  if (!sb) {
+    el.authError.hidden = false;
+    el.authError.textContent = "Auth is still initializing — give it a second and try again.";
     return;
   }
-  const sw = e.target.closest("[data-auth-switch]");
-  if (sw) {
-    setAuthMode(sw.dataset.authSwitch);
-    el.authError.hidden = true;
-  }
-});
+  try {
+    if (pendingComposerPrompt) {
+      sessionStorage.setItem("pendingComposerPrompt", pendingComposerPrompt);
+    } else {
+      sessionStorage.removeItem("pendingComposerPrompt");
+    }
+  } catch (_) { /* private mode / storage disabled — continue */ }
 
-el.authForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  if (!sb) return;
+  el.googleSignInBtn.disabled = true;
+  el.googleSignInBtn.querySelector(".btn-google-label").textContent = "Redirecting to Google…";
   el.authError.hidden = true;
-  el.authError.textContent = "";
-  el.authError.style.color = "";
-  const email = el.authEmail.value.trim();
-  const password = el.authPassword.value;
-  if (!email || !password) return;
-
-  el.authSubmitBtn.disabled = true;
-  const origLabel = el.authSubmitLabel.textContent;
-  el.authSubmitLabel.textContent = authMode === "signup" ? "Creating…" : "Signing in…";
 
   try {
-    let resp;
-    if (authMode === "signup") {
-      // We disable email confirmation in Supabase — sign-up should return an
-      // active session immediately. If for any reason no session comes back
-      // (e.g. someone re-enabled Confirm email in the dashboard), fall through
-      // to an immediate password sign-in rather than telling the user to check
-      // their email.
-      resp = await sb.auth.signUp({ email, password });
-      if (resp.error) throw resp.error;
-      if (resp.data && resp.data.user && !resp.data.session) {
-        // No session on signup means Supabase is set to Confirm Email (server
-        // side). Attempt the fallback signin — it will fail with
-        // "email_not_confirmed", which we translate into an actionable message.
-        const signIn = await sb.auth.signInWithPassword({ email, password });
-        if (signIn.error) {
-          const msg = (signIn.error.message || "").toLowerCase();
-          if (msg.includes("not confirmed") || msg.includes("confirm")) {
-            throw new Error(
-              "Account created. We're still enabling instant signin — " +
-              "please try signing in again in a minute, or check your email " +
-              "for a confirmation link."
-            );
-          }
-          throw signIn.error;
-        }
-      }
-    } else {
-      resp = await sb.auth.signInWithPassword({ email, password });
-      if (resp.error) {
-        const msg = (resp.error.message || "").toLowerCase();
-        if (msg.includes("not confirmed") || msg.includes("confirm")) {
-          throw new Error(
-            "Please check your email for a confirmation link, or contact " +
-            "support@nothollywood.ai if you already confirmed."
-          );
-        }
-        throw resp.error;
-      }
-    }
-    closeModal(el.authModal);
-    el.authForm.reset();
-    // UX: after successful signup or signin, drop the user straight into
-    // the composer so they don't land on the marketing shell wondering what
-    // to click. Small delay lets renderAuthUI paint the nav chip first.
-    // If they landed on auth by clicking a specific template/idea tile,
-    // restore that prompt so they don't lose their intent.
-    setTimeout(() => {
-      const prefill = pendingComposerPrompt;
-      pendingComposerPrompt = null;
-      if (typeof openComposer === "function") openComposer(prefill);
-    }, 150);
+    const { error } = await sb.auth.signInWithOAuth({
+      provider: "google",
+      options: {
+        redirectTo: window.location.origin + "/",
+        queryParams: { access_type: "offline", prompt: "select_account" },
+      },
+    });
+    if (error) throw error;
+    // signInWithOAuth returns after kicking off the redirect. Browser will
+    // navigate to accounts.google.com next tick — nothing more to do here.
   } catch (err) {
+    el.googleSignInBtn.disabled = false;
+    el.googleSignInBtn.querySelector(".btn-google-label").textContent = "Continue with Google";
     el.authError.hidden = false;
     el.authError.textContent = (err && err.message) || String(err);
-  } finally {
-    el.authSubmitBtn.disabled = false;
-    el.authSubmitLabel.textContent = origLabel;
   }
-});
+}
+
+el.googleSignInBtn.addEventListener("click", signInWithGoogle);
+
+// If we came back from a Google redirect, Supabase parsed the session into
+// currentUser via onAuthStateChange. Check for a stashed composer prompt and
+// pop the composer once so returning users land on the tile they clicked.
+function handleOAuthReturn() {
+  try {
+    const stashed = sessionStorage.getItem("pendingComposerPrompt");
+    if (stashed && currentUser) {
+      sessionStorage.removeItem("pendingComposerPrompt");
+      pendingComposerPrompt = null;
+      setTimeout(() => {
+        if (typeof openComposer === "function") openComposer(stashed);
+      }, 200);
+    }
+  } catch (_) { /* storage disabled — no-op */ }
+}
 
 renderIdeas();
 renderTemplates();

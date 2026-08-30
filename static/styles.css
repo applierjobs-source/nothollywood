@@ -1707,6 +1707,58 @@ textarea::placeholder { color: var(--text-faint); }
 }
 .auth-form .field { margin-bottom: 16px; }
 
+/* Google SSO button — Material-esque, white pill on any background. */
+.auth-google-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 24px;
+}
+.btn-google {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  width: 100%;
+  padding: 14px 20px;
+  background: #fff;
+  color: #1f1f1f;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  border-radius: 10px;
+  font-size: 15px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+.btn-google:hover:not(:disabled) {
+  background: #f8f9fa;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
+}
+.btn-google:active:not(:disabled) { transform: translateY(1px); }
+.btn-google:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.btn-google-icon {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+.btn-google-label { line-height: 1; }
+.auth-terms {
+  font-size: 12px;
+  color: var(--text-dim, #8a8a8a);
+  text-align: center;
+  line-height: 1.5;
+}
+.auth-terms a {
+  color: var(--text-dim, #8a8a8a);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 /* Deep-link highlight: when the user opens /#job-<id> from the completion
    email, the target tile gets a brief pulse so it's obvious which one just
    finished. Fades on its own after ~2.4s (see handleDeepLink in app.js). */
