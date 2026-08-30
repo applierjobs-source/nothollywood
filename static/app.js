@@ -1066,7 +1066,28 @@ document.addEventListener("click", (e) => {
   const tile = e.target.closest(".tile[data-id]");
   if (!tile) return;
   if (tile.dataset.open !== "1") return;
-  const job = jobs.find((j) => j.id === tile.dataset.id);
+  const id = tile.dataset.id;
+  // Look up in every possible source: active jobs, showcase clips, and
+  // durable library rows. Without this, the featured shelf tiles — which
+  // aren't in the user's jobs[] array — silently do nothing on click.
+  let job = jobs.find((j) => j.id === id);
+  if (!job && typeof SHOWCASE_JOBS !== "undefined") {
+    job = SHOWCASE_JOBS.find((j) => j.id === id);
+  }
+  if (!job) {
+    const libRow = (libraryRenders || []).find((r) => r.id === id);
+    if (libRow) {
+      job = {
+        id: libRow.id,
+        status: "done",
+        video: libRow.video_url,
+        prompt: libRow.prompt || "",
+        duration: libRow.duration || 0,
+        resolution: libRow.resolution || "768P",
+        finished_at: libRow.created_at ? new Date(libRow.created_at).getTime() / 1000 : 0,
+      };
+    }
+  }
   if (job) openDetail(job);
 });
 
