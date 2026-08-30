@@ -32,3 +32,6 @@ uploaded_attachments/
 # QA screenshots
 qa-*.png
 *.log
+
+# Scratch/experiments
+tmp/
