@@ -1012,6 +1012,31 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
         j["status"] = "done"
         j["video"] = f"/static/videos/{job_id}.mp4"
         j["finished_at"] = time.time()
+        # Persist to user library (best-effort; never fails the render).
+        # Anonymous jobs (no user_id) are skipped inside save_render_to_library.
+        try:
+            import library as _lib
+            library_meta = {
+                "title": j.get("franchise_title"),
+                "slug": j.get("franchise_slug"),
+                "duration": j.get("duration") or sum(j.get("scenes") or []),
+                "resolution": j.get("resolution"),
+                "scene_count": len(j.get("scenes") or [1]),
+                "scenes": j.get("scenes") or [],
+                "franchise_ref_url": j.get("ref_url_used") or j.get("franchise_ref_url"),
+            }
+            saved = _lib.save_render_to_library(
+                job_id=job_id,
+                user_id=j.get("user_id") or "",
+                prompt=j.get("prompt") or "",
+                video_path=dest,
+                meta=library_meta,
+            )
+            if saved:
+                j["saved_to_library"] = True
+                save_jobs(JOBS)
+        except Exception as e:
+            print(f"[render {job_id}] library save exception (non-fatal): {e}")
     else:
         j["status"] = "failed"
         j["error"] = f"finalize failed: {err}"
@@ -1525,6 +1550,62 @@ async def regenerate_refs(
         if len(out) >= 6:
             break
     return {"candidates": out, "query_used": search_q}
+
+
+@app.get("/api/library")
+async def get_library(request: Request):
+    """Return the current user's saved renders, newest first.
+
+    Each item includes a short-lived signed video URL and (if we have one) a
+    signed thumbnail URL. URLs expire in 1 hour, matching Supabase's default
+    signed-URL policy. Anonymous callers get a 401.
+    """
+    claims = require_user(request)
+    user_id = claims.get("sub") or ""
+    if not user_id:
+        raise HTTPException(401, "authentication required")
+    import library as _lib
+    rows = _lib.list_renders(user_id)
+    out = []
+    for row in rows:
+        video_url = _lib.signed_url_for(row.get("storage_path") or "", ttl_seconds=3600)
+        thumb_url = _lib.signed_url_for(row.get("thumb_path") or "", ttl_seconds=3600) if row.get("thumb_path") else None
+        if not video_url:
+            # Row exists but the storage object was purged or signing failed —
+            # skip so the frontend doesn't render a broken tile.
+            continue
+        out.append({
+            "id": row.get("id"),
+            "prompt": row.get("prompt"),
+            "title": row.get("title"),
+            "duration": row.get("duration"),
+            "resolution": row.get("resolution"),
+            "scene_count": row.get("scene_count"),
+            "created_at": row.get("created_at"),
+            "video_url": video_url,
+            "thumb_url": thumb_url,
+            "bytes": row.get("bytes"),
+        })
+    return {"renders": out}
+
+
+@app.delete("/api/library/{job_id}")
+async def delete_from_library(job_id: str, request: Request):
+    """Remove one of the caller's saved renders.
+
+    Deletes both the DB row and storage objects. Ownership is enforced by
+    matching user_id from the JWT against the row's user_id inside the
+    library helper.
+    """
+    claims = require_user(request)
+    user_id = claims.get("sub") or ""
+    if not user_id:
+        raise HTTPException(401, "authentication required")
+    import library as _lib
+    ok = _lib.delete_render(job_id, user_id)
+    if not ok:
+        raise HTTPException(500, "delete failed")
+    return {"deleted": job_id}
 
 
 @app.get("/api/_status/providers")

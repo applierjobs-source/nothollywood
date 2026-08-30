@@ -119,6 +119,7 @@ let currentDetailJob = null;
 let sb = null;
 let currentUser = null;     // null when signed out; { id, email, ... } when signed in
 let authRequired = false;   // true when backend reports auth is configured
+let libraryRenders = [];    // durable renders fetched from /api/library (survive deploys)
 let authMode = "signin";    // "signin" | "signup"
 
 async function initAuth() {
@@ -157,6 +158,7 @@ async function initAuth() {
       currentUser = session ? session.user : null;
       renderAuthUI();
       refreshJobs();
+      refreshLibrary();
     });
   } catch (err) {
     console.warn("auth init failed", err);
@@ -991,14 +993,60 @@ function renderShelves() {
     return;
   }
   el.shelfRenders.hidden = false;
-  if (finished.length) {
+
+  // Merge in-memory 'finished' jobs (fresh from this session) with durable
+  // library renders (persist across deploys). Library rows come from
+  // /api/library and are keyed by job_id, so we dedupe by id and prefer the
+  // in-memory job when both exist (in-memory has richer status info during
+  // the brief post-render window). Library-only rows are shown as static
+  // done tiles using their signed video URL.
+  const inMemoryIds = new Set(finished.map((j) => j.id));
+  const libraryOnly = (libraryRenders || [])
+    .filter((r) => !inMemoryIds.has(r.id))
+    .map((r) => ({
+      id: r.id,
+      status: "done",
+      video: r.video_url,
+      thumb: r.thumb_url,
+      prompt: r.prompt || "",
+      duration: r.duration || 0,
+      scenes: Array.from({ length: r.scene_count || 1 }, () => Math.max(1, Math.floor((r.duration || 0) / (r.scene_count || 1)))),
+      finished_at: r.created_at ? new Date(r.created_at).getTime() / 1000 : 0,
+      created_at: r.created_at ? new Date(r.created_at).getTime() / 1000 : 0,
+      saved_to_library: true,
+    }));
+  const combined = [...finished, ...libraryOnly];
+  if (combined.length) {
     el.rendersEmpty.hidden = true;
-    el.rendersRow.innerHTML = finished
+    el.rendersRow.innerHTML = combined
       .sort((a, b) => (b.finished_at || b.created_at || 0) - (a.finished_at || a.created_at || 0))
       .map(renderTile).join("");
   } else {
     el.rendersEmpty.hidden = false;
     el.rendersRow.querySelectorAll(".tile").forEach((t) => t.remove());
+  }
+}
+
+async function refreshLibrary() {
+  // Fetch the caller's durable renders. No-op when signed out. Silent on
+  // failure so a bad response never blocks the rest of the UI — the user
+  // still sees in-memory finished jobs and the Featured shelf.
+  if (authRequired && !currentUser) {
+    libraryRenders = [];
+    return;
+  }
+  try {
+    const r = await authedFetch(`${API}/api/library`);
+    if (!r.ok) {
+      // 401 during sign-in bounce is expected; suppress the log noise.
+      if (r.status !== 401) console.warn("library fetch failed", r.status);
+      return;
+    }
+    const data = await r.json();
+    libraryRenders = Array.isArray(data.renders) ? data.renders : [];
+    renderShelves();
+  } catch (err) {
+    console.warn("library fetch exception", err);
   }
 }
 
@@ -1232,7 +1280,12 @@ async function refreshJobs() {
     for (const id of priorActiveIds) {
       if (!stillActiveIds.has(id)) { flipped = true; break; }
     }
-    if (flipped) refreshCredits();
+    if (flipped) {
+      refreshCredits();
+      // A job just finished — pull the durable library so the tile keeps
+      // pointing at the persisted MP4 even after the in-memory job ages out.
+      refreshLibrary();
+    }
     renderHero();
     renderShelves();
     schedulePoll();
@@ -1476,6 +1529,7 @@ updateLengthDisplay();
   renderAuthUI();
   installVisibilityRefresh();
   await refreshJobs();
+  refreshLibrary(); // durable renders — non-blocking
   // Handle deep-links from the completion email (e.g. /#job-abc123).
   // If the URL has a #job-<id> fragment on load, scroll that tile into
   // view and open it. If the render is still active we fall through to
