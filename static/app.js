@@ -46,6 +46,9 @@ const el = {
   renderStartedModal: $("#renderStartedModal"),
   renderStartedEmail: $("#renderStartedEmail"),
   renderStartedEta: $("#renderStartedEta"),
+  noCreditsModal: $("#noCreditsModal"),
+  noCreditsMessage: $("#noCreditsMessage"),
+  noCreditsCta: $("#noCreditsCta"),
   authError: $("#authError"),
   authTitle: $("#authTitle"),
   authSub: $("#authSub"),
@@ -385,6 +388,19 @@ document.addEventListener("keydown", (e) => {
 // template tile) so we can restore it after they finish signing up.
 let pendingComposerPrompt = null;
 
+function showNoCreditsModal(customMessage) {
+  const msg = customMessage || "You need credits to render. Packs start at $15.";
+  if (el.noCreditsMessage) el.noCreditsMessage.textContent = msg;
+  if (el.noCreditsCta) {
+    el.noCreditsCta.onclick = () => { window.location.href = "/pricing.html"; };
+  }
+  if (el.noCreditsModal) {
+    openModal(el.noCreditsModal);
+  } else if (window.confirm(msg + "\n\nOpen pricing to add credits?")) {
+    window.location.href = "/pricing.html";
+  }
+}
+
 function openComposer(prefillPrompt) {
   // Auth gate: if auth is required and no user is signed in, route them to
   // the signup modal instead. The composer will auto-open after successful
@@ -393,6 +409,13 @@ function openComposer(prefillPrompt) {
   if (authRequired && !currentUser) {
     if (prefillPrompt) pendingComposerPrompt = prefillPrompt;
     openAuthModal("signup");
+    return;
+  }
+  // Pre-flight credit check: if we already know the user has zero credits
+  // (and they're not unlimited), don't let them fill out a prompt only to
+  // hit a 402 on submit. Send them to pricing right away.
+  if (currentUser && lastCreditsBalance !== null && lastCreditsBalance !== Infinity && lastCreditsBalance <= 0) {
+    showNoCreditsModal();
     return;
   }
   if (prefillPrompt) {
@@ -759,15 +782,20 @@ async function submitGenerate({ prompt, duration, resolution, chosenRefUrl, chos
     }
   }
   if (r.status === 402) {
-    // Out of credits — send them to pricing rather than a generic error toast.
-    let msg = "You don’t have enough credits for this render.";
+    // Out of credits — surface a themed modal that deep-links to pricing
+    // rather than a native confirm() dialog.
+    let msg = "You need credits to render. Packs start at $15.";
     try {
       const body = await r.json();
       if (body && body.detail && body.detail.message) msg = body.detail.message;
     } catch (_) { /* body wasn't JSON */ }
-    if (window.confirm(msg + "\n\nOpen pricing to add credits?")) {
-      window.location.href = "/pricing.html";
-    }
+    // Also close any composer/preview modals so the credits modal is on top
+    // and the user isn't confused about which dialog they're in.
+    closeModal(el.composerModal);
+    closeModal(el.previewModal);
+    setTimeout(() => showNoCreditsModal(msg), 240);
+    // Refresh nav balance since the server just told us we're out.
+    refreshCredits();
     throw new Error(msg);
   }
   if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`);

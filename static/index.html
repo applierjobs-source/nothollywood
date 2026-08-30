@@ -388,6 +388,32 @@
     </div>
 
     <!-- Render Started confirmation — appears right after clicking Render -->
+    <div class="modal" id="noCreditsModal" hidden aria-hidden="true">
+      <div class="modal-backdrop" data-close></div>
+      <div class="modal-card render-started-card" role="dialog" aria-modal="true" aria-labelledby="noCreditsTitle">
+        <button class="modal-close" data-close aria-label="Close">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M6 18L18 6"/></svg>
+        </button>
+        <div class="render-started-body">
+          <div class="render-started-icon" aria-hidden="true" style="color:#e5322f;">
+            <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <circle cx="12" cy="12" r="9"/>
+              <path d="M12 8v4M12 16h.01"/>
+            </svg>
+          </div>
+          <p class="composer-eyebrow">Out of credits</p>
+          <h2 id="noCreditsTitle" class="composer-title">You need credits to render.</h2>
+          <p class="render-started-lead" id="noCreditsMessage">
+            Add credits to continue. Packs start at $15.
+          </p>
+          <div class="render-started-actions" style="gap:12px;">
+            <button type="button" class="btn-primary" id="noCreditsCta">See pricing</button>
+            <button type="button" class="btn-secondary" data-close>Not now</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="modal" id="renderStartedModal" hidden aria-hidden="true">
       <div class="modal-backdrop" data-close></div>
       <div class="modal-card render-started-card" role="dialog" aria-modal="true" aria-labelledby="renderStartedTitle">
