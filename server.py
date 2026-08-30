@@ -700,6 +700,29 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
     # Every scene starts from the same initial ref (the upload, if any).
     ref_url = initial_ref_data_url  # arg name is legacy; already a public https URL
 
+    # If the user did NOT upload a reference AND the prompt names a TV show or
+    # movie, resolve a cast reference frame now (cache hit is instant; DDG
+    # search or Grok Imagine may take a few seconds). This is intentionally
+    # done inside the worker thread so /api/generate stays fast. Failure just
+    # falls through to no-reference generation — same as before this feature.
+    if not ref_url:
+        try:
+            info = resolve_franchise_ref(
+                prompt,
+                franchise_refs_dir=FRANCHISE_REFS,
+                public_origin=PUBLIC_ORIGIN,
+            )
+        except Exception as e:
+            print(f"[worker] franchise ref resolve crashed: {type(e).__name__}: {e}")
+            info = None
+        if info:
+            ref_url = info["url"]
+            job["ref_url"] = ref_url
+            job["ref_source"] = f"franchise:{info['source']}"
+            job["ref_title"] = info.get("title")
+            job["ref_slug"] = info.get("slug")
+            save_jobs(JOBS)
+
     # scene_states tracks the status string reported by reAPI for each scene
     # so we can compute an aggregate progress signal for the UI.
     scene_states: dict[int, str] = {i: "queued" for i in range(len(scenes))}
@@ -1380,27 +1403,11 @@ async def generate(
             ref_source = "upload"
         # If PUBLIC_ORIGIN is unset (dev with no public URL), we silently drop
         # the reference. Better than sending a data URL that reAPI will reject.
-    else:
-        # No user upload — see if the prompt names ANY TV show or movie and
-        # produce a cast reference frame for it. Cache hit is fast; a cache
-        # miss can add ~5-30s (web image search, or ~20s OpenAI generation).
-        # Never blocks: on failure we simply run without a reference, same as
-        # if the user didn't mention any show at all.
-        info = resolve_franchise_ref(
-            prompt,
-            franchise_refs_dir=FRANCHISE_REFS,
-            public_origin=PUBLIC_ORIGIN,
-        )
-        if info:
-            ref_url = info["url"]
-            # source: cache | search | generated -- record as detail after
-            # a 'franchise' base tag so /api/_debug/jobs can distinguish.
-            ref_source = f"franchise:{info['source']}"
-            ref_title = info.get("title")
-            ref_slug = info.get("slug")
-        else:
-            ref_title = None
-            ref_slug = None
+    # NB: franchise-ref resolution used to happen here, synchronously. That
+    # kept the /api/generate request open for up to ~30s (LLM title extract +
+    # web image search + Grok Imagine fallback) which made the UI freeze on
+    # "submitting...". We now do it inside multi_scene_worker before scene 1
+    # so the HTTP handler returns immediately with a queued job.
     JOBS[job_id] = {
         "id": job_id,
         "prompt": prompt.strip(),
@@ -1416,8 +1423,6 @@ async def generate(
         "user_email": user_email,
         "ref_source": ref_source,
         "ref_url": ref_url,
-        "ref_title": locals().get("ref_title"),
-        "ref_slug": locals().get("ref_slug"),
     }
     save_jobs(JOBS)
     Thread(target=multi_scene_worker, args=(job_id, ref_url), daemon=True).start()
