@@ -318,6 +318,150 @@ def _franchise_audio_signature(prompt: str) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Franchise theme-opener sequences (scene 1 for long-form renders)
+# ---------------------------------------------------------------------------
+#
+# Real sitcoms always open with the title sequence + theme song. Skipping
+# straight into the cold open makes an AI-generated episode feel like a
+# rough cut, not a produced show. For long-form renders (60s+ where we
+# have the outline flow) we now reserve scene 1 as the show's opener.
+#
+# Each entry is a compact scene brief describing the canonical title
+# sequence for that franchise — signature imagery, title-card, and theme
+# music. The video model reads this verbatim as scene 1's prompt.
+#
+# For unknown shows we fall back to a generic title-card opener.
+
+_FRANCHISE_OPENERS: dict[str, str] = {
+    "seinfeld": (
+        "OPENING TITLE SEQUENCE (Seinfeld): a single Jerry Seinfeld stand-up "
+        "comedy cutaway on a small brick-wall stand-up stage, holding a microphone, "
+        "delivering a one-line observational joke about everyday life to a laughing "
+        "audience. The signature Seinfeld slap-bass theme song plays. Cut to a bold "
+        "white 'Seinfeld' logo card on black at the end, with the slap-bass sting "
+        "resolving."
+    ),
+    "family guy": (
+        "OPENING TITLE SEQUENCE (Family Guy): the Griffin family (Peter in white "
+        "shirt/green pants, Lois in green dress, Chris, Meg, Stewie in yellow "
+        "overalls, Brian the white dog) sitting on a piano bench in front of "
+        "their Quahog living room, singing the theme song vaudeville-style with "
+        "Stewie playing piano. Bright cartoon palette, thick outlines. End on the "
+        "'Family Guy' logo card as the theme resolves."
+    ),
+    "the simpsons": (
+        "OPENING TITLE SEQUENCE (The Simpsons): the iconic pan through Springfield "
+        "clouds to reveal the town, then quick cuts of Homer at the nuclear plant, "
+        "Bart writing on the chalkboard, Marge and Maggie at the checkout counter, "
+        "Lisa playing saxophone, and the family racing home to converge on the "
+        "couch. Danny Elfman-style orchestral Simpsons theme. Yellow-skinned "
+        "Simpsons style, thick outlines. End on the 'The Simpsons' logo card."
+    ),
+    "rick and morty": (
+        "OPENING TITLE SEQUENCE (Rick and Morty): quick chaotic cuts of Rick and "
+        "Morty running from monsters through a portal, a spaceship exploding, "
+        "Rick drooling and holding a portal gun, Morty screaming, cosmic landscapes "
+        "with tentacle creatures. Sparse synth Rick and Morty theme with the "
+        "signature belch-and-riff. Adult-swim animation style, thick outlines. "
+        "End on the 'Rick and Morty' logo card."
+    ),
+    "south park": (
+        "OPENING TITLE SEQUENCE (South Park): quick construction-paper cutout "
+        "cuts of the boys (Stan, Kyle, Cartman, Kenny) walking to the school "
+        "bus stop in a snowy Colorado mountain town, with Primus-style guitar "
+        "theme song. Flat cutout animation, minimal shading. End on the 'South "
+        "Park' logo card."
+    ),
+    "the office": (
+        "OPENING TITLE SEQUENCE (The Office, US): documentary-style handheld "
+        "shots of Scranton, PA — pan across the office park sign, snow-covered "
+        "streets, Dunder Mifflin building exterior. Then quick cuts of Michael "
+        "laughing, Dwight scowling, Jim smirking at camera, Pam smiling at her "
+        "reception desk. The iconic Office theme piano/acoustic melody plays. "
+        "Fluorescent office lighting, muted beige/blue palette. End on the "
+        "'The Office' logo card in the show's slab typography."
+    ),
+    "parks and recreation": (
+        "OPENING TITLE SEQUENCE (Parks and Recreation): documentary-style shots "
+        "of Pawnee, Indiana — the town's murals, the parks department building, "
+        "and quick cuts of Leslie Knope smiling, Ron Swanson looking stoic with "
+        "his moustache, April rolling her eyes. Bouncy banjo Parks and Rec theme "
+        "plays. Handheld mockumentary look. End on the 'Parks and Recreation' "
+        "logo card."
+    ),
+    "the big bang theory": (
+        "OPENING TITLE SEQUENCE (The Big Bang Theory): rapid-fire montage of "
+        "scientific and cultural history — planets, dinosaurs, cavemen, "
+        "pyramids, DNA helices, Einstein, moon landing, city skylines — cut "
+        "to the Barenaked Ladies' 'History of Everything' theme song. Ends on "
+        "the 'The Big Bang Theory' logo card. Multi-camera sitcom color palette."
+    ),
+    "friends": (
+        "OPENING TITLE SEQUENCE (Friends): the six main friends (Ross, Rachel, "
+        "Monica, Chandler, Joey, Phoebe) splashing around in a fountain at night "
+        "in matching casual outfits, laughing and dancing with a couch and "
+        "umbrella props. The Rembrandts 'I'll Be There For You' theme plays. "
+        "Warm 90s NYC lighting. End on the 'Friends' logo card in the show's "
+        "colorful dotted typography."
+    ),
+    "cheers": (
+        "OPENING TITLE SEQUENCE (Cheers): vintage sepia-toned illustrations "
+        "and photos of old Boston bars, patrons drinking together across "
+        "decades, warm sepia palette. The 'Where Everybody Knows Your Name' "
+        "piano theme plays. End on the 'Cheers' logo card in the show's "
+        "classic serif typography."
+    ),
+    "it's always sunny": (
+        "OPENING TITLE SEQUENCE (It's Always Sunny in Philadelphia): grainy "
+        "handheld shots of Philadelphia — South Street, the Liberty Bell, "
+        "gritty urban streets, Paddy's Pub exterior — with the 'Temptation Rag' "
+        "jaunty piano theme playing. Casual naturalistic look. End on the 'It's "
+        "Always Sunny in Philadelphia' logo card in typewriter typography."
+    ),
+    "curb your enthusiasm": (
+        "OPENING TITLE SEQUENCE (Curb Your Enthusiasm): a simple white title "
+        "card on black with the show's name in bold serif type, while the "
+        "'Frolic' tuba-and-mandolin theme by Luciano Michelini plays. That's "
+        "the entire opener — no montage, just the music and the card."
+    ),
+    "arrested development": (
+        "OPENING TITLE SEQUENCE (Arrested Development): quick cuts of the "
+        "Bluth family posing awkwardly against a white background, with Ron "
+        "Howard's narrator voice introducing 'the story of a wealthy family who "
+        "lost everything.' The ukulele-and-banjo Arrested Development theme "
+        "plays. Bright, single-camera look. End on the 'Arrested Development' "
+        "logo card."
+    ),
+}
+
+_GENERIC_OPENER = (
+    "OPENING TITLE SEQUENCE: a bold typographic title-card animation of the "
+    "show's title on a solid color background, with a punchy 6-second theme "
+    "song appropriate to the show's tone (upbeat for sitcoms, dramatic for "
+    "prestige TV, quirky for animated). End on a clean hold of the title card "
+    "as the theme resolves."
+)
+
+
+def _franchise_opener(prompt: str) -> str:
+    """Return the opening title sequence brief for a franchise.
+
+    Falls back to a generic title-card opener when no franchise matches, so
+    every long-form render still gets a proper theme-song intro.
+    """
+    p = prompt.lower()
+    for key in _FRANCHISE_OPENERS:
+        if key in p:
+            return _FRANCHISE_OPENERS[key]
+    for alias, franchise in _FRANCHISE_ALIASES.items():
+        if alias in p:
+            opener = _FRANCHISE_OPENERS.get(franchise)
+            if opener:
+                return opener
+    return _GENERIC_OPENER
+
+
 # Generic transition guidance appended to the system prompt so the LLM writes
 # real editorial language into scene prompts — not just "cut to" but the
 # right KIND of cut for the format. When we have an outline (long form),
@@ -425,9 +569,21 @@ def expand_prompt(
     n = len(scene_durations)
     t0 = time.time()
 
+    # Helper: apply the long-form opener guarantee to a scenes list. Called on
+    # every early-return path so a fallback caused by an LLM outage still ships
+    # with a proper theme sequence as scene 1.
+    def _ensure_opener(result: dict[str, Any]) -> dict[str, Any]:
+        if outline and result.get("scenes"):
+            first = str(result["scenes"][0]).upper()
+            if not any(marker in first for marker in
+                       ("OPENING TITLE SEQUENCE", "TITLE SEQUENCE",
+                        "LOGO CARD", "THEME SONG")):
+                result["scenes"][0] = _franchise_opener(prompt)
+        return result
+
     selected = _select_provider()
     if selected is None:
-        return _fallback(prompt, scene_durations, t0, "no LLM key set (XAI_API_KEY or ANTHROPIC_API_KEY)")
+        return _ensure_opener(_fallback(prompt, scene_durations, t0, "no LLM key set (XAI_API_KEY or ANTHROPIC_API_KEY)"))
     provider_name, url, model, headers = selected
 
     hint = _known_character_hint(prompt)
@@ -451,22 +607,33 @@ def expand_prompt(
     # A-story beats, B-story beats, and tag — cutting between A and B as a
     # real sitcom would.
     if outline:
+        # Reserve scene 1 as the opening title sequence for long-form renders.
+        # Real sitcoms always open with the theme song; skipping straight to
+        # the cold open makes the episode feel like a rough cut. We pass the
+        # opener brief to the LLM and require it to use it verbatim for scene 1,
+        # then distribute the outline beats across scenes 2..N.
+        opener_brief = _franchise_opener(prompt)
         user_msg += (
             "\nPre-approved story outline (follow this exactly, cutting "
             "between A-story and B-story scenes as a sitcom would):\n"
             + json.dumps(outline, indent=2)
-            + "\n\nDistribute the scenes roughly:\n"
-            "- Scene 1: cold open\n"
+            + "\n\nRESERVED SCENE 1 — OPENING TITLE SEQUENCE (use verbatim as "
+            "scene 1's prompt, this is non-negotiable):\n"
+            + opener_brief
+            + "\n\nDistribute the remaining scenes (2 through N) as follows:\n"
+            "- Scene 2: cold open\n"
             "- ~55% of remaining scenes to A-story beats (in order)\n"
             "- ~35% of remaining scenes to B-story beats (in order)\n"
             "- Interleave A and B scenes as cuts (A, A, B, A, B, B, A, ...) "
             "so both stories progress in parallel. Don't render all A then all B.\n"
             "- Last scene: tag\n"
-            "- Each scene prompt should reference which story thread it "
-            "belongs to at the start of the prompt (e.g. 'A-STORY BEAT 2:' "
+            "- Each scene prompt (except scene 1) should reference which story "
+            "thread it belongs to at the start of the prompt (e.g. 'A-STORY BEAT 2:' "
             "or 'B-STORY BEAT 1:' or 'COLD OPEN:' or 'TAG:').\n"
             "\nTransition and pacing rules for the outline:\n"
-            "- Cold open ends with the theme/music sting swelling and a \"hard cut to titles\" beat.\n"
+            "- Scene 1 (title sequence) ends on the logo card hold with the theme resolving.\n"
+            "- Scene 2 (cold open) opens by cutting from the logo card into the scene, "
+            "and ends with the theme/music sting swelling before act one begins.\n"
             "- The first scene AFTER a thread change (A->B or B->A) must include "
             "'hard cut to [new location]' in its opening beat so the editorial "
             "transition is legible; the scene BEFORE the thread change must end "
@@ -495,13 +662,13 @@ def expand_prompt(
             timeout=EXPANSION_TIMEOUT,
         )
     except requests.RequestException as e:
-        return _fallback(prompt, scene_durations, t0, f"http error ({provider_name}): {e}")
+        return _ensure_opener(_fallback(prompt, scene_durations, t0, f"http error ({provider_name}): {e}"))
 
     if r.status_code != 200:
-        return _fallback(
+        return _ensure_opener(_fallback(
             prompt, scene_durations, t0,
             f"{provider_name} {r.status_code}: {r.text[:200]}"
-        )
+        ))
 
     try:
         data = r.json()
@@ -516,23 +683,23 @@ def expand_prompt(
         ]
         raw = "".join(text_blocks).strip()
     except Exception as e:
-        return _fallback(prompt, scene_durations, t0, f"parse error ({provider_name}): {e}")
+        return _ensure_opener(_fallback(prompt, scene_durations, t0, f"parse error ({provider_name}): {e}"))
 
     # Model sometimes wraps JSON in ```json fences even when told not to.
     m = re.search(r"\{.*\}", raw, re.DOTALL)
     if not m:
-        return _fallback(prompt, scene_durations, t0, f"no JSON in response: {raw[:200]}")
+        return _ensure_opener(_fallback(prompt, scene_durations, t0, f"no JSON in response: {raw[:200]}"))
     try:
         parsed = json.loads(m.group(0))
     except json.JSONDecodeError as e:
-        return _fallback(prompt, scene_durations, t0, f"invalid JSON: {e}")
+        return _ensure_opener(_fallback(prompt, scene_durations, t0, f"invalid JSON: {e}"))
 
     scenes = parsed.get("scenes") or []
     if not isinstance(scenes, list) or len(scenes) != n:
-        return _fallback(
+        return _ensure_opener(_fallback(
             prompt, scene_durations, t0,
             f"expected {n} scenes, got {len(scenes) if isinstance(scenes, list) else type(scenes).__name__}"
-        )
+        ))
 
     # Normalize each scene to a str and cap length so we don't blow past
     # MiniMax's prompt limit.
@@ -544,6 +711,22 @@ def expand_prompt(
         if len(s) > 1500:
             s = s[:1500]
         scenes_norm.append(s)
+
+    # Safety net: for long-form (outline) renders, scene 1 MUST be the opening
+    # title sequence. We asked the LLM to use the opener verbatim but LLMs
+    # sometimes paraphrase or blend it into the cold open. If scene 1 doesn't
+    # look like a title sequence, replace it. Only applies when outline is set,
+    # so short renders (< 60s) still use their first scene as intended.
+    if outline and scenes_norm:
+        first = scenes_norm[0].upper()
+        looks_like_opener = (
+            "OPENING TITLE SEQUENCE" in first
+            or "TITLE SEQUENCE" in first
+            or "LOGO CARD" in first
+            or "THEME SONG" in first
+        )
+        if not looks_like_opener:
+            scenes_norm[0] = _franchise_opener(prompt)
 
     return {
         "ok": True,
