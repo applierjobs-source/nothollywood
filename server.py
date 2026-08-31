@@ -29,30 +29,24 @@ from franchise_ref import (
     _download_and_validate,
 )
 
-# Providers: fal.ai (fast, default) and reAPI (unmoderated fallback).
+# Video provider: fal.ai H3 Max (fast). Renders a 5s 768p clip with synced audio
+# in ~6-10s wall-clock. Full migration from reAPI (~2min) on 2026-08-31.
 #
-# fal.ai hosts H3 Max which renders a 5s 768p clip with audio in under 7s wall-clock
-# (~30x faster than reAPI's ~2min). Migrated as the default provider on 2026-08-31.
-# See https://fal.ai/models/minimax/h3-max/text-to-video/api
-#
-# reAPI is kept as an explicit fallback for two reasons:
-#   1. H3 Max doesn't have reference-to-video (R2V) yet — for scene 0 identity
-#      anchoring we fall back to standard H3 on fal (minimax/h3/reference-to-video),
-#      but if that's slow we can force PROVIDER=reapi.
-#   2. fal's content-safety posture is undocumented; reAPI's content_filter:false
-#      is the known-good path for NSFW-adjacent content we've already shipped.
-#
-# Provider selection: env var VIDEO_PROVIDER=fal|reapi (default: fal).
-BASE = "https://reapi.ai/api/v1"
+# Endpoint routing:
+#   - Text-only:            minimax/h3-max/text-to-video      (~6s)
+#   - Image-to-video:       minimax/h3-max/image-to-video     (~7s)
+#   - Scene 0 with a user reference OR franchise still: we do NOT use H3's
+#     reference-to-video (that endpoint is on standard H3 and takes ~2-3 min).
+#     Instead we blend the reference into a natural opening keyframe via
+#     fal-ai/nano-banana/edit (~15-20s), then feed the keyframe to H3 Max I2V
+#     as its literal first frame (~7s). Total scene 0 = ~25s vs 2-3 min.
 FAL_BASE = "https://queue.fal.run"
 GROK_BASE = "https://api.x.ai/v1"
 
-VIDEO_PROVIDER = (os.environ.get("VIDEO_PROVIDER", "fal").strip().lower() or "fal")
-
-# Public origin for scene-chaining reference-image URLs. reAPI's first_frame_url
-# rejects data URLs and requires a public https URL, so we serve extracted frames
-# and uploaded references from our own /static mount and pass those URLs to reAPI.
-# Falls back to a relative path in dev; reAPI will reject those, which is fine
+# Public origin for scene-chaining reference-image URLs. fal's image_url
+# requires a public https URL (rejects data URLs), so we serve extracted frames
+# and uploaded references from our own /static mount and pass those URLs to fal.
+# Falls back to a relative path in dev; fal will reject those, which is fine
 # because single-scene text-to-video does not use reference images.
 PUBLIC_ORIGIN = os.environ.get("PUBLIC_ORIGIN", "").rstrip("/")
 
@@ -70,14 +64,7 @@ def _load_env_file() -> None:
 
 
 _load_env_file()
-# reAPI key (fallback provider).
-# REAPI_API_KEY: primary Railway/dev env var
-# CUSTOM_CRED_REAPI_AI_TOKEN: publish_website credential proxy fallback (main-agent sandbox)
-API_KEY = (
-    os.environ.get("REAPI_API_KEY", "")
-    or os.environ.get("CUSTOM_CRED_REAPI_AI_TOKEN", "")
-)
-# fal.ai key (default provider).
+# fal.ai key (video + image edit).
 # FAL_KEY: primary Railway/dev env var (matches fal's own convention)
 # CUSTOM_CRED_QUEUE_FAL_RUN_TOKEN: publish_website credential proxy fallback
 FAL_KEY = (
@@ -251,10 +238,6 @@ def save_jobs(jobs: dict) -> None:
 JOBS: dict = load_jobs()
 
 
-def headers() -> dict:
-    return {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
-
-
 def fal_headers() -> dict:
     # fal.ai accepts both `Key <token>` and `Bearer <token>`. Bearer is friendlier
     # for our env-var mixing since some proxies rewrite Authorization headers.
@@ -361,68 +344,12 @@ def encode_image_bytes(raw: bytes, mime: str = "image/png") -> str:
     return f"data:{mime};base64,{b64}"
 
 
-# ─── reAPI resolution mapping ─────────────────────────────────────────────
-# Internal API surface uses "768P" / "1080P" (kept for backward compat with the
-# frontend). reAPI supports "768P" or "2K" only. 1080P callers get bumped to 2K.
-_REAPI_RESOLUTIONS = {"768P": "768P", "1080P": "2K", "2K": "2K"}
-
-
-def _reapi_resolution(res: str) -> str:
-    return _REAPI_RESOLUTIONS.get(res, "768P")
-
-
-def _submit_reapi(
-    prompt: str,
-    duration: int,
-    resolution: str,
-    ref_url: str | None,
-    ref_mode: str,
-) -> tuple[str | None, str | None]:
-    """reAPI implementation of submit_h3. Returns (task_id, error).
-
-    ref_url must be a public https URL — reAPI rejects data URLs. When ref_url is
-    provided, aspect_ratio is omitted (orientation derives from the source image).
-    content_filter is disabled unconditionally.
-    """
-    body: dict = {
-        "model": "minimax-h3",
-        "prompt": prompt,
-        "duration": duration,
-        "resolution": _reapi_resolution(resolution),
-        "content_filter": False,
-    }
-    if ref_url and ref_mode == "subject":
-        body["reference_image_urls"] = [ref_url]
-        body["aspect_ratio"] = "16:9"
-    elif ref_url:
-        body["first_frame_url"] = ref_url
-    else:
-        body["aspect_ratio"] = "16:9"
-    try:
-        r = requests.post(f"{BASE}/videos/generations", headers=headers(), json=body, timeout=60)
-    except Exception as e:  # noqa: BLE001
-        return None, f"network error: {e}"
-    if r.status_code >= 300:
-        try:
-            err_obj = r.json().get("error") or {}
-            msg = err_obj.get("message") or r.text[:400]
-        except Exception:  # noqa: BLE001
-            msg = r.text[:400]
-        return None, f"reapi http {r.status_code}: {msg}"
-    data = r.json()
-    tid = data.get("id")
-    if not tid:
-        return None, f"reapi no id in response: {data}"
-    # Namespace the task id so fetch_task can route it back to the right provider.
-    return f"reapi:{tid}", None
-
-
-# fal.ai H3 durations are integers, resolutions are enums differing by endpoint.
-# H3 Max (fast, 768p only): 480P, 768P. Standard H3 R2V/I2V (slower, up to 2K):
-# 480P, 768P, 2K, 4K. We map the frontend's resolution string to whichever the
-# chosen fal endpoint accepts.
+# ─── fal.ai video provider ─────────────────────────────────────────────────
+# H3 Max resolutions: 480P and 768P only. Standard H3 (only used by ref-to-video,
+# which we no longer call) supports up to 4K. We keep the frontend's legacy
+# strings (768P, 1080P, 2K) and map anything above 768P down to 768P since H3
+# Max is our only endpoint.
 _FAL_MAX_RESOLUTIONS = {"480P": "480P", "768P": "768P", "1080P": "768P", "2K": "768P", "4K": "768P"}
-_FAL_STD_RESOLUTIONS = {"480P": "480P", "768P": "768P", "1080P": "2K", "2K": "2K", "4K": "4K"}
 
 
 def _submit_fal(
@@ -432,37 +359,24 @@ def _submit_fal(
     ref_url: str | None,
     ref_mode: str,
 ) -> tuple[str | None, str | None]:
-    """fal.ai implementation of submit_h3. Returns (task_id, error).
+    """Submit a scene to fal.ai H3 Max. Returns (task_id, error).
 
     Endpoint selection:
-      - No ref_url:                     minimax/h3-max/text-to-video       (fast, ~6s)
-      - ref_url + ref_mode='first_frame': minimax/h3-max/image-to-video    (fast, ~7s)
-      - ref_url + ref_mode='subject':    minimax/h3/reference-to-video     (slower, ~3min)
+      - No ref_url:                       minimax/h3-max/text-to-video   (~6s)
+      - ref_url (any ref_mode):           minimax/h3-max/image-to-video  (~7s)
 
-    The 'subject' path uses standard H3 (not Max) because H3 Max does not yet have
-    a reference-to-video variant. This is only used for scene 0 identity anchoring,
-    so it's one slow call per multi-scene job; subsequent scenes chain via i2v.
+    ref_mode is now advisory only: with fal we ALWAYS use I2V because H3 Max
+    doesn't have R2V and standard H3's R2V is too slow. Callers that want
+    identity anchoring (scene 0 with a user reference) should pre-blend the
+    reference into a natural opening keyframe via generate_keyframe() and
+    pass THAT to submit_h3 as first_frame.
 
-    Task IDs are returned namespaced as 'fal:{endpoint}:{request_id}' so fetch_task
-    can rebuild the correct status/response URLs.
+    Task IDs are namespaced 'fal:{endpoint}:{request_id}' so fetch_task can
+    rebuild the correct status/response URLs.
     """
-    # Route to the right endpoint.
-    if ref_url and ref_mode == "subject":
-        endpoint = "minimax/h3/reference-to-video"
-        body: dict = {
-            "prompt": prompt,
-            "reference_image_urls": [ref_url],
-            "resolution": _FAL_STD_RESOLUTIONS.get(resolution, "768P"),
-            "duration": duration,
-            "aspect_ratio": "16:9",
-            # Undocumented on fal — safety_checker default is true. Set to false
-            # so we get the same posture as reAPI's content_filter:false. If fal
-            # ignores it we'll see rejected prompts in logs and can re-decide.
-            "enable_safety_checker": False,
-        }
-    elif ref_url:
+    if ref_url:
         endpoint = "minimax/h3-max/image-to-video"
-        body = {
+        body: dict = {
             "prompt": prompt,
             "image_url": ref_url,
             "resolution": _FAL_MAX_RESOLUTIONS.get(resolution, "768P"),
@@ -508,63 +422,20 @@ def submit_h3(
     ref_url: str | None,
     ref_mode: str = "first_frame",
 ) -> tuple[str | None, str | None]:
-    """Submit a scene to the active video provider.
-
-    Returns (task_id, error). The task_id is namespaced ("fal:..." or "reapi:...")
-    so fetch_task can route the poll back to the right backend. Callers should
-    treat task_id as opaque.
-
-    ref_mode selects how the reference image is used:
-      - "first_frame": image-to-video (I2V). The reference IS the literal opening
-        frame. Correct for scene-chaining (last frame of scene N becomes first
-        frame of scene N+1).
-      - "subject": reference-to-video (R2V). The reference anchors character
-        identity but is NOT the opening frame. Correct for scene 0 when the user
-        picks a promo/cast photo.
-    """
-    if VIDEO_PROVIDER == "fal" and FAL_KEY:
-        return _submit_fal(prompt, duration, resolution, ref_url, ref_mode)
-    # Explicit reAPI or fal misconfigured — fall through.
-    if not API_KEY:
-        return None, "no video provider configured: set FAL_KEY or REAPI_API_KEY"
-    return _submit_reapi(prompt, duration, resolution, ref_url, ref_mode)
-
-
-def _fetch_reapi(raw_id: str) -> dict:
-    """Poll reAPI task status. See fetch_task for the returned shape contract."""
-    try:
-        r = requests.get(f"{BASE}/tasks/{raw_id}", headers=headers(), timeout=30)
-    except Exception:  # noqa: BLE001
-        return {}
-    if r.status_code != 200:
-        return {}
-    raw = r.json()
-    status = raw.get("status", "processing")
-    mapped_status = {
-        "completed": "succeeded",
-        "processing": "running",
-        "queued": "queued",
-        "failed": "failed",
-    }.get(status, status)
-    out: dict = {"status": mapped_status}
-    urls = (raw.get("output") or {}).get("video_urls") or []
-    if urls:
-        out["content"] = {"url": urls[0]}
-    err = raw.get("error")
-    if err:
-        out["error"] = {"message": err.get("message", "generation failed")}
-    return out
+    """Submit a scene to fal.ai H3 Max. See _submit_fal for endpoint routing."""
+    if not FAL_KEY:
+        return None, "no fal.ai key configured: set FAL_KEY"
+    return _submit_fal(prompt, duration, resolution, ref_url, ref_mode)
 
 
 def _fetch_fal(endpoint: str, request_id: str) -> dict:
-    """Poll fal.ai queue for a request. See fetch_task for the returned shape contract.
+    """Poll fal.ai queue for a request. Returns the legacy shape
+    {status, content: {url}, error: {message}}.
 
-    fal exposes status_url and response_url paths derived from the endpoint prefix.
-    For 'minimax/h3-max/text-to-video' the request path becomes
+    fal exposes status_url and response_url paths derived from the endpoint
+    prefix. For 'minimax/h3-max/text-to-video' the request path becomes
     'minimax/h3-max/requests/{request_id}/status'.
     """
-    # Trim the trailing task suffix (text-to-video / image-to-video / reference-to-video)
-    # so the request URL matches fal's format: {model_prefix}/requests/{id}[/status].
     prefix = endpoint.rsplit("/", 1)[0]
     status_url = f"{FAL_BASE}/{prefix}/requests/{request_id}/status"
     response_url = f"{FAL_BASE}/{prefix}/requests/{request_id}"
@@ -595,7 +466,6 @@ def _fetch_fal(endpoint: str, request_id: str) -> dict:
         except Exception as e:  # noqa: BLE001
             out = {"status": "failed", "error": {"message": f"fal result fetch failed: {e}"}}
     elif mapped == "failed":
-        # fal's status endpoint carries logs; the error message is usually in logs[-1].
         logs = sj.get("logs") or []
         msg = "fal generation failed"
         if logs and isinstance(logs, list):
@@ -609,23 +479,137 @@ def _fetch_fal(endpoint: str, request_id: str) -> dict:
 
 
 def fetch_task(task_id: str) -> dict:
-    """Poll a submitted job. Returns a dict shaped like the old MiniMax response
-    so render_one_scene doesn't need to know which provider was used:
-    {status: succeeded|running|queued|failed, content: {url}, error: {message}}.
+    """Poll a submitted job. Returns {status, content: {url}, error: {message}}.
 
-    task_id is namespaced by submit_h3 as either 'reapi:<id>' or 'fal:<endpoint>:<id>'.
-    Legacy unprefixed ids are assumed to be reAPI ids for backwards compatibility
-    with any in-flight jobs during the migration.
+    task_id is namespaced by submit_h3 as 'fal:<endpoint>:<request_id>'.
     """
     if task_id.startswith("fal:"):
-        # fal:{endpoint}:{request_id} where endpoint contains slashes.
         _, rest = task_id.split(":", 1)
         endpoint, request_id = rest.rsplit(":", 1)
         return _fetch_fal(endpoint, request_id)
-    if task_id.startswith("reapi:"):
-        return _fetch_reapi(task_id[len("reapi:"):])
-    # Legacy unnamespaced ids (in-flight during migration) — reAPI.
-    return _fetch_reapi(task_id)
+    # Legacy reAPI task ids from before the migration are silently failed;
+    # they'll appear as failed renders and users can regenerate. This branch
+    # is defensive; JOBS should not contain any in-flight reAPI ids.
+    return {"status": "failed", "error": {"message": "provider retired"}}
+
+
+# ─── fal.ai keyframe generation (nano-banana edit) ────────────────────────
+# Used for scene 0 when a franchise cast still and/or user upload should
+# anchor identity WITHOUT showing up as the literal opening frame. We call
+# nano-banana/edit to blend the reference(s) with the scene prompt into a
+# natural opening still (~15-20s), save it under /static/frames/, and hand
+# the public URL back so submit_h3 can feed it to H3 Max I2V.
+_NANOBANANA_ENDPOINT = "fal-ai/nano-banana/edit"
+
+
+def _fal_edit_image(
+    prompt: str,
+    image_urls: list[str],
+    aspect_ratio: str = "16:9",
+) -> tuple[str | None, str | None]:
+    """Submit a nano-banana edit and block until the result URL is available.
+
+    Returns (image_url, error). ~15-20s wall clock. Nano-banana accepts up to
+    3 image URLs; we pass at most the first 3.
+    """
+    if not FAL_KEY:
+        return None, "no fal.ai key configured"
+    body = {
+        "prompt": prompt,
+        "image_urls": image_urls[:3],
+        "num_images": 1,
+        "aspect_ratio": aspect_ratio,
+        "output_format": "jpeg",
+    }
+    try:
+        r = requests.post(f"{FAL_BASE}/{_NANOBANANA_ENDPOINT}", headers=fal_headers(), json=body, timeout=60)
+    except Exception as e:  # noqa: BLE001
+        return None, f"nano-banana network error: {e}"
+    if r.status_code >= 300:
+        try:
+            err = r.json()
+            msg = err.get("detail") or err.get("message") or r.text[:400]
+            if isinstance(msg, list):
+                msg = "; ".join(str(m) for m in msg)
+        except Exception:  # noqa: BLE001
+            msg = r.text[:400]
+        return None, f"nano-banana http {r.status_code}: {msg}"
+    data = r.json()
+    req_id = data.get("request_id")
+    if not req_id:
+        return None, f"nano-banana no request_id: {str(data)[:200]}"
+    status_url = f"{FAL_BASE}/fal-ai/nano-banana/requests/{req_id}/status"
+    response_url = f"{FAL_BASE}/fal-ai/nano-banana/requests/{req_id}"
+    # Poll for up to 60s at 1.5s intervals — normal completion is 15-20s.
+    start = time.time()
+    while time.time() - start < 60:
+        time.sleep(1.5)
+        try:
+            sr = requests.get(status_url, headers=fal_headers(), timeout=15)
+            if sr.status_code != 200:
+                continue
+            st = sr.json().get("status")
+            if st == "COMPLETED":
+                rr = requests.get(response_url, headers=fal_headers(), timeout=30)
+                res = rr.json()
+                imgs = res.get("images") or []
+                if imgs and imgs[0].get("url"):
+                    return imgs[0]["url"], None
+                return None, f"nano-banana no image in result: {str(res)[:200]}"
+            if st == "FAILED":
+                return None, "nano-banana generation failed"
+        except Exception:  # noqa: BLE001
+            continue
+    return None, "nano-banana timed out after 60s"
+
+
+def generate_scene0_keyframe(
+    scene_prompt: str,
+    reference_urls: list[str],
+    job_id: str,
+) -> tuple[str | None, str | None]:
+    """Blend one or more reference images (user upload, franchise cast still)
+    with the scene 0 prompt into a natural opening keyframe. Downloads the
+    result to /static/frames/ and returns its public URL.
+
+    Returns (public_url, error). Public URL requires PUBLIC_ORIGIN; if unset,
+    we return an error rather than a data URL — H3 Max I2V needs a public URL.
+    """
+    if not reference_urls:
+        return None, "no references to blend"
+    if not PUBLIC_ORIGIN:
+        return None, "PUBLIC_ORIGIN unset — cannot host keyframe"
+
+    # Compose an edit prompt that reframes the reference(s) as the opening
+    # shot of the scene. The trick: describe the scene as an image, not a
+    # video. Nano-banana treats the references as source subjects and the
+    # prompt as the target composition.
+    edit_prompt = (
+        "A single cinematic film still that serves as the opening frame of "
+        "the following scene. Blend the reference image(s) as the identity "
+        "of the characters and setting into a natural establishing shot. "
+        "16:9 widescreen, natural lighting, no captions, no text overlays.\n\n"
+        f"Scene: {scene_prompt}"
+    )
+
+    img_url, err = _fal_edit_image(edit_prompt, reference_urls, aspect_ratio="16:9")
+    if not img_url:
+        return None, err or "keyframe generation failed"
+
+    # Download to our own /static/frames/ so H3 Max I2V gets a URL we control
+    # (avoids v3b.fal.media expiring or getting rate-limited).
+    try:
+        got = _download_and_validate(img_url)
+        if not got:
+            return None, "keyframe download failed"
+        raw, ext = got
+        frame_name = f"seed_{job_id}.{ext}"
+        (FRAMES / frame_name).write_bytes(raw)
+        return f"{PUBLIC_ORIGIN}/static/frames/{frame_name}", None
+    except Exception as e:  # noqa: BLE001
+        return None, f"keyframe save failed: {e}"
+
+
 
 
 def plan_scenes(total_seconds: int) -> list[int]:
@@ -758,24 +742,20 @@ def _download_video(url: str, out_path: Path) -> tuple[bool, str]:
 # 3s. We also apply a mild backoff after the first minute since long-running
 # jobs are unlikely to complete on the very next poll and rapid polling only
 # helps near the end.
-POLL_FAST_S = 3      # first 60s of a scene
-POLL_SLOW_S = 5      # after 60s
-POLL_SWITCH_S = 60   # when to switch from fast to slow
-# fal H3 Max finishes in ~6–10s so we start much tighter. Reference-to-video
-# on standard H3 takes minutes and reverts to the slow interval.
-FAL_POLL_TIGHT_S = 1.5
-FAL_POLL_MEDIUM_S = 3
-FAL_POLL_TIGHT_UNTIL_S = 30
+# fal H3 Max finishes in ~6–10s so we poll tight early.
+POLL_TIGHT_S = 1.5
+POLL_MEDIUM_S = 3
+POLL_SLOW_S = 5
+POLL_TIGHT_UNTIL_S = 30
+POLL_MEDIUM_UNTIL_S = 60
 
 
 def _poll_interval(elapsed: float) -> float:
-    if VIDEO_PROVIDER == "fal":
-        if elapsed < FAL_POLL_TIGHT_UNTIL_S:
-            return FAL_POLL_TIGHT_S
-        if elapsed < POLL_SWITCH_S:
-            return FAL_POLL_MEDIUM_S
-        return POLL_SLOW_S
-    return POLL_FAST_S if elapsed < POLL_SWITCH_S else POLL_SLOW_S
+    if elapsed < POLL_TIGHT_UNTIL_S:
+        return POLL_TIGHT_S
+    if elapsed < POLL_MEDIUM_UNTIL_S:
+        return POLL_MEDIUM_S
+    return POLL_SLOW_S
 
 
 def _render_with_grok(
@@ -1235,14 +1215,47 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
     # scene's last frame. For single-scene renders: just render once with the
     # initial ref (if any).
     current_ref = ref_url  # initial upload if any, else None
-    # Scene 0 uses the user-picked reference as an identity anchor (R2V) so
-    # that photo doesn't show up as the opening frame. Scenes 1+ chain from
-    # the previous scene's extracted last frame, which IS meant to be the
-    # opening frame (I2V) for seamless continuity.
-    current_ref_mode = "subject" if current_ref else "first_frame"
+    # Scene 0 identity anchor: if the user picked a reference (upload or
+    # franchise cast still), we pre-blend it with the scene prompt into a
+    # natural opening keyframe via nano-banana/edit (~15-20s), then feed the
+    # keyframe to H3 Max I2V as its literal first frame. This avoids the
+    # ~2-3min standard-H3 R2V endpoint while still anchoring identity, and
+    # avoids showing the raw reference photo as the first ~0.5s of video.
+    #
+    # Scenes 1+ chain from the previous scene's extracted last frame (I2V).
+    current_ref_mode = "first_frame"  # always I2V now
+    if current_ref:
+        j = JOBS.get(job_id)
+        if j is not None:
+            j["status"] = "keyframe"
+            save_jobs(JOBS)
+        # Use the scene 0 prompt as the blend target. scenes[0]_prompt is
+        # written into the JOBS record by /api/generate before the worker
+        # starts; fall back to the top-level prompt if missing.
+        job_rec = JOBS.get(job_id) or {}
+        scenes_meta = job_rec.get("scenes") or []
+        s0_prompt = (
+            (scenes_meta[0].get("prompt") if scenes_meta else None)
+            or job_rec.get("prompt")
+            or "cinematic film still"
+        )
+        keyframe_url, kf_err = generate_scene0_keyframe(
+            scene_prompt=s0_prompt,
+            reference_urls=[current_ref],
+            job_id=job_id,
+        )
+        if keyframe_url:
+            print(f"[render {job_id}] scene 0 keyframe generated: {keyframe_url}")
+            current_ref = keyframe_url
+        else:
+            # Keyframe generation failed — fall back to using the raw reference
+            # as the first frame. It'll show as the opening ~0.5s but the render
+            # completes fast rather than 2-3 min on R2V.
+            print(f"[render {job_id}] keyframe generation failed ({kf_err}); using raw reference as first frame")
     j = JOBS.get(job_id)
     if j is not None:
         j["render_mode"] = "sequential" if use_sequential else "single"
+        j["status"] = "rendering"
         save_jobs(JOBS)
     for i, dur in enumerate(scenes):
         try:
@@ -1266,7 +1279,7 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
                 # From scene 1 onward the ref IS the intended opening frame.
                 current_ref_mode = "first_frame"
             else:
-                # No public origin means reAPI can't fetch our frame. Keep going
+                # No public origin means fal can't fetch our frame. Keep going
                 # with prompt-only continuity — still better than random.
                 current_ref = None
                 current_ref_mode = "first_frame"
@@ -2123,10 +2136,8 @@ def provider_status():
         "xai_api_key": bool(_fr.XAI_API_KEY),
         "xai_model": _fr.XAI_MODEL if _fr.XAI_API_KEY else None,
         "xai_image_model": _fr.XAI_IMAGE_MODEL if _fr.XAI_API_KEY else None,
-        "reapi_key": bool(API_KEY),
         "fal_key": bool(FAL_KEY),
-        "video_provider": VIDEO_PROVIDER,
-        "active_provider": ("fal" if VIDEO_PROVIDER == "fal" and FAL_KEY else "reapi"),
+        "active_provider": ("fal" if FAL_KEY else "none"),
         "public_origin": bool(PUBLIC_ORIGIN),
         "resend_email": bool(os.environ.get("RESEND_API_KEY")),
         "email_from": EMAIL_FROM if os.environ.get("RESEND_API_KEY") else None,
