@@ -815,6 +815,22 @@ body::before {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Per-scene mini progress bar. Only drawn when Fal gives us a real fraction,
+   so it's a live signal (climbs while the model is inferring) rather than a
+   fake time-based fill. Sits inline at the far right of the scene row. */
+.scene-row-bar {
+  display: inline-block;
+  width: 56px; height: 3px;
+  background: rgba(255,255,255,0.10);
+  border-radius: 2px; overflow: hidden;
+  margin-left: 6px; flex-shrink: 0;
+}
+.scene-row-bar-fill {
+  display: block; height: 100%;
+  background: linear-gradient(90deg, var(--accent-2, #6ad4ff), var(--accent, #6a8cff));
+  border-radius: 2px;
+  transition: width 400ms ease-out;
+}
 .tile-active-progress {
   position: relative;
   height: 3px;

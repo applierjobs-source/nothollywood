@@ -1076,15 +1076,29 @@ function renderHero() {
 // scenes_state array — no per-scene fabrication on the frontend.
 function sceneRowHTML(s, job) {
   const status = (s.status || "queued").toLowerCase();
+  // Real Fal signals when the backend has them:
+  //   s.queue_position: int   — "you're 3rd in line at Fal" while IN_QUEUE
+  //   s.progress:       0..1  — parsed from model logs while IN_PROGRESS
+  // Fall back to wall-clock elapsed only when neither is present.
+  const hasProgress = typeof s.progress === "number" && s.progress >= 0;
+  const progPct = hasProgress ? Math.round(s.progress * 100) : 0;
   const label = (() => {
-    if (status === "queued") return "Queued";
+    if (status === "queued") {
+      if (typeof s.queue_position === "number") {
+        if (s.queue_position === 0) return "Next up at Fal";
+        return `Queued · #${s.queue_position + 1} in line`;
+      }
+      return "Queued";
+    }
     if (status === "submitting") return "Submitting…";
     if (status === "running") {
-      if (s.started_at) {
-        const elapsed = Math.max(0, Math.round((Date.now() / 1000) - s.started_at));
-        return `Rendering · ${elapsed}s`;
+      const elapsed = s.started_at
+        ? Math.max(0, Math.round((Date.now() / 1000) - s.started_at))
+        : 0;
+      if (hasProgress) {
+        return elapsed ? `Rendering · ${progPct}% · ${elapsed}s` : `Rendering · ${progPct}%`;
       }
-      return "Rendering…";
+      return s.started_at ? `Rendering · ${elapsed}s` : "Rendering…";
     }
     if (status === "succeeded") {
       if (s.started_at && s.finished_at && s.finished_at > s.started_at) {
@@ -1098,12 +1112,19 @@ function sceneRowHTML(s, job) {
   })();
   const dot = `<span class="scene-row-dot scene-row-dot-${status}"></span>`;
   const durLabel = `${s.duration}s`;
+  // Per-row mini progress bar for running scenes with a real percent. Purely
+  // visual — the label already says "42%" — but gives a scannable stripe
+  // that makes long scene lists easier to skim.
+  const miniBar = status === "running" && hasProgress
+    ? `<span class="scene-row-bar" aria-hidden="true"><span class="scene-row-bar-fill" style="width:${progPct}%"></span></span>`
+    : "";
   return `
-    <div class="scene-row scene-row-${status}" data-scene-idx="${s.index}" data-scene-started="${s.started_at || 0}">
+    <div class="scene-row scene-row-${status}" data-scene-idx="${s.index}" data-scene-started="${s.started_at || 0}" data-scene-progress="${hasProgress ? s.progress : ""}">
       ${dot}
       <span class="scene-row-idx">Scene ${s.index + 1}</span>
       <span class="scene-row-dur">${durLabel}</span>
       <span class="scene-row-label">${escapeHtml(label)}</span>
+      ${miniBar}
     </div>
   `;
 }
@@ -1128,10 +1149,32 @@ function renderTile(job) {
     const done = Number(job.scene_done || 0);
     const failed = Number(job.scene_failed || 0);
     const running = Number(job.scene_running || 0);
-    // We fill the bar based on completed work. Running scenes push it a small
-    // amount so it's not literally stuck at 0% while 4 scenes render in parallel.
-    const runningBoost = Math.min(running, total) * 0.15; // half a scene, capped
-    const overallFrac = Math.min(0.98, (done + runningBoost) / total);
+    // Overall progress model:
+    //   Sum every scene's contribution to the whole:
+    //     succeeded  → 1.0
+    //     running    → real Fal fraction if we have one, else 0.15 shimmer
+    //     queued     → 0
+    //     failed     → 1.0 (counts as done for bar purposes so we don't stall)
+    //   Divide by total. This makes the bar climb in real time as Fal reports
+    //   model progress, instead of only jumping when a whole scene finishes.
+    const scenesForBar = Array.isArray(job.scenes_state) ? job.scenes_state : [];
+    let contribution = 0;
+    if (scenesForBar.length) {
+      for (const s of scenesForBar) {
+        const st = (s.status || "queued").toLowerCase();
+        if (st === "succeeded" || st === "failed") { contribution += 1; continue; }
+        if (st === "running") {
+          const p = typeof s.progress === "number" ? s.progress : null;
+          contribution += (p !== null ? Math.max(0.02, Math.min(0.98, p)) : 0.15);
+          continue;
+        }
+        // queued → 0
+      }
+    } else {
+      // Fallback: no scenes_state yet, use coarse counters.
+      contribution = done + Math.min(running, total) * 0.15;
+    }
+    const overallFrac = Math.min(0.98, contribution / total);
     const pct = Math.max(2, Math.round(overallFrac * 100));
     const isStitching = job.status === "stitching";
     const finalPct = isStitching ? 96 : pct;

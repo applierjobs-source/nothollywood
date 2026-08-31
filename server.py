@@ -6,6 +6,7 @@ prompts into multiple 10-second scenes and stitches them together with ffmpeg.
 import base64
 import json
 import os
+import re
 import subprocess
 import time
 import uuid
@@ -429,16 +430,74 @@ def submit_h3(
     return _submit_fal(prompt, duration, resolution, ref_url, ref_mode)
 
 
+# Cheap parser for progress signals that Fal-hosted models emit into logs.
+# MiniMax H3 (and most video models on Fal) print lines like:
+#   "progress: 0.42"
+#   "Generating frames [██████░░░░] 60%"
+#   "step 12/50"
+# We scan the latest logs and return a 0..1 fraction when we can find one,
+# else None. Never throws — progress is best-effort and callers must tolerate
+# a missing value (they fall back to wall-clock ETA).
+_PROGRESS_RE = re.compile(r"progress[:=\s]+([01](?:\.\d+)?|\d{1,3}(?:\.\d+)?%?)", re.IGNORECASE)
+_PERCENT_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
+_STEP_RE = re.compile(r"step\s+(\d+)\s*/\s*(\d+)", re.IGNORECASE)
+
+
+def _parse_fal_progress(logs: list) -> float | None:
+    """Walk logs newest-first, return the freshest 0..1 progress signal.
+
+    Recognizes three shapes commonly emitted by video models on Fal:
+      progress: 0.42        → 0.42
+      ███░░ 42%              → 0.42
+      step 12/50            → 0.24
+    Returns None when no shape matches (so callers fall back to time-based).
+    """
+    if not logs or not isinstance(logs, list):
+        return None
+    for entry in reversed(logs):
+        msg = entry.get("message") if isinstance(entry, dict) else (entry if isinstance(entry, str) else "")
+        if not msg:
+            continue
+        m = _PROGRESS_RE.search(msg)
+        if m:
+            raw = m.group(1).rstrip("%")
+            try:
+                v = float(raw)
+            except ValueError:
+                continue
+            if v > 1.0:  # "progress: 42" or "progress: 42%"
+                v = v / 100.0
+            return max(0.0, min(1.0, v))
+        m = _STEP_RE.search(msg)
+        if m:
+            cur, tot = int(m.group(1)), int(m.group(2))
+            if tot > 0:
+                return max(0.0, min(1.0, cur / tot))
+        m = _PERCENT_RE.search(msg)
+        if m:
+            try:
+                v = float(m.group(1)) / 100.0
+            except ValueError:
+                continue
+            return max(0.0, min(1.0, v))
+    return None
+
+
 def _fetch_fal(endpoint: str, request_id: str) -> dict:
     """Poll fal.ai queue for a request. Returns the legacy shape
-    {status, content: {url}, error: {message}}.
+    {status, content: {url}, error: {message}} plus optional progress signals:
+      queue_position: int | None   — when IN_QUEUE
+      progress_fraction: float | None  — when IN_PROGRESS and logs contain
+                                        a parseable progress hint
 
     fal exposes status_url and response_url paths derived from the endpoint
     prefix. For 'minimax/h3-max/text-to-video' the request path becomes
-    'minimax/h3-max/requests/{request_id}/status'.
+    'minimax/h3-max/requests/{request_id}/status'. We request logs=1 so the
+    status payload includes model stdout/stderr and we can parse
+    per-scene percentages instead of guessing from wall-clock time alone.
     """
     prefix = endpoint.rsplit("/", 1)[0]
-    status_url = f"{FAL_BASE}/{prefix}/requests/{request_id}/status"
+    status_url = f"{FAL_BASE}/{prefix}/requests/{request_id}/status?logs=1"
     response_url = f"{FAL_BASE}/{prefix}/requests/{request_id}"
     try:
         sr = requests.get(status_url, headers=fal_headers(), timeout=30)
@@ -455,6 +514,17 @@ def _fetch_fal(endpoint: str, request_id: str) -> dict:
         "FAILED": "failed",
     }.get(st, "running")
     out: dict = {"status": mapped}
+    # Queue position surfaces "you're 3rd in line at Fal" to the UI so users
+    # know a stuck scene is queued, not actually stuck.
+    if mapped == "queued":
+        qp = sj.get("queue_position")
+        if isinstance(qp, int) and qp >= 0:
+            out["queue_position"] = qp
+    # Real per-scene progress from model logs — the whole point of this change.
+    if mapped in ("queued", "running"):
+        prog = _parse_fal_progress(sj.get("logs") or [])
+        if prog is not None:
+            out["progress_fraction"] = prog
     if mapped == "succeeded":
         try:
             rr = requests.get(response_url, headers=fal_headers(), timeout=30)
@@ -830,7 +900,19 @@ def render_one_scene(
         polls += 1
         task = fetch_task(task_id)
         status = task.get("status", "running")
-        on_status(status)
+        # Pass through the extra signals from Fal so the worker can attach
+        # them to scenes_state and the UI can render a real progress bar
+        # (percent + queue position) instead of a wall-clock estimate.
+        # Older on_status callbacks only accept one positional arg; guard
+        # with a TypeError fallback so we don't regress single-arg callers.
+        try:
+            on_status(
+                status,
+                queue_position=task.get("queue_position"),
+                progress_fraction=task.get("progress_fraction"),
+            )
+        except TypeError:
+            on_status(status)
         if status == "succeeded":
             url = (task.get("content") or {}).get("url")
             if not url:
@@ -1046,6 +1128,11 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
     scene_states: dict[int, str] = {i: "queued" for i in range(len(scenes))}
     scene_started_at: dict[int, float] = {}
     scene_finished_at: dict[int, float] = {}
+    # Populated from Fal status polling in render_one_scene's on_status
+    # callback. queue_position is set only while a scene is IN_QUEUE at Fal;
+    # scene_progress is a 0..1 fraction parsed from model logs while running.
+    scene_queue_position: dict[int, int] = {}
+    scene_progress: dict[int, float] = {}
 
     # Seed the scenes_state array once so the UI can render the scene list
     # from the moment the job is created, not after the first status callback.
@@ -1160,6 +1247,10 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
                 "started_at": scene_started_at.get(i, 0.0),
                 "finished_at": scene_finished_at.get(i, 0.0),
                 "eta_seconds": max(20, min(180, int(scenes[i] * 5 + 10))),
+                # Real Fal signals when available. Frontend uses these when
+                # present and falls back to wall-clock ETA otherwise.
+                "queue_position": scene_queue_position.get(i),
+                "progress": scene_progress.get(i),
             }
             for i in range(len(scenes))
         ]
@@ -1197,11 +1288,21 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
                     f"{prompt}"
                 )
 
-        def _on_status(status: str):
+        def _on_status(status: str, queue_position: int | None = None, progress_fraction: float | None = None):
             prev = scene_states.get(idx)
             scene_states[idx] = status
             if status == "running" and idx not in scene_started_at:
                 scene_started_at[idx] = time.time()
+            # Stash Fal's per-scene signals so _publish_agg_status can copy
+            # them onto scenes_state[idx]. Missing values are fine — UI
+            # falls back to wall-clock ETA when neither is present.
+            if queue_position is not None:
+                scene_queue_position[idx] = queue_position
+            elif status == "running":
+                # Once the scene is running it's no longer queued; drop stale value.
+                scene_queue_position.pop(idx, None)
+            if progress_fraction is not None:
+                scene_progress[idx] = float(progress_fraction)
             _publish_agg_status()
 
         ok, err = render_one_scene(
