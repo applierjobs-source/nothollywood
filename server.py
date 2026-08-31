@@ -29,12 +29,25 @@ from franchise_ref import (
     _download_and_validate,
 )
 
-# Provider: reAPI (unmoderated MiniMax H3 host).
-# Migrated from MiniMax direct on 2026-08-28. reAPI proxies to the same underlying H3
-# model with the option to disable Google-style content filtering via content_filter:false.
-# See https://reapi.ai/models/minimax-h3 for the full schema.
+# Providers: fal.ai (fast, default) and reAPI (unmoderated fallback).
+#
+# fal.ai hosts H3 Max which renders a 5s 768p clip with audio in under 7s wall-clock
+# (~30x faster than reAPI's ~2min). Migrated as the default provider on 2026-08-31.
+# See https://fal.ai/models/minimax/h3-max/text-to-video/api
+#
+# reAPI is kept as an explicit fallback for two reasons:
+#   1. H3 Max doesn't have reference-to-video (R2V) yet — for scene 0 identity
+#      anchoring we fall back to standard H3 on fal (minimax/h3/reference-to-video),
+#      but if that's slow we can force PROVIDER=reapi.
+#   2. fal's content-safety posture is undocumented; reAPI's content_filter:false
+#      is the known-good path for NSFW-adjacent content we've already shipped.
+#
+# Provider selection: env var VIDEO_PROVIDER=fal|reapi (default: fal).
 BASE = "https://reapi.ai/api/v1"
+FAL_BASE = "https://queue.fal.run"
 GROK_BASE = "https://api.x.ai/v1"
+
+VIDEO_PROVIDER = (os.environ.get("VIDEO_PROVIDER", "fal").strip().lower() or "fal")
 
 # Public origin for scene-chaining reference-image URLs. reAPI's first_frame_url
 # rejects data URLs and requires a public https URL, so we serve extracted frames
@@ -57,12 +70,19 @@ def _load_env_file() -> None:
 
 
 _load_env_file()
-# reAPI key.
+# reAPI key (fallback provider).
 # REAPI_API_KEY: primary Railway/dev env var
 # CUSTOM_CRED_REAPI_AI_TOKEN: publish_website credential proxy fallback (main-agent sandbox)
 API_KEY = (
     os.environ.get("REAPI_API_KEY", "")
     or os.environ.get("CUSTOM_CRED_REAPI_AI_TOKEN", "")
+)
+# fal.ai key (default provider).
+# FAL_KEY: primary Railway/dev env var (matches fal's own convention)
+# CUSTOM_CRED_QUEUE_FAL_RUN_TOKEN: publish_website credential proxy fallback
+FAL_KEY = (
+    os.environ.get("FAL_KEY", "")
+    or os.environ.get("CUSTOM_CRED_QUEUE_FAL_RUN_TOKEN", "")
 )
 # Grok Imagine fallback: kicks in when MiniMax flags a prompt as sensitive.
 # XAI_API_KEY: direct env var or
@@ -235,6 +255,12 @@ def headers() -> dict:
     return {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
 
 
+def fal_headers() -> dict:
+    # fal.ai accepts both `Key <token>` and `Bearer <token>`. Bearer is friendlier
+    # for our env-var mixing since some proxies rewrite Authorization headers.
+    return {"Authorization": f"Bearer {FAL_KEY}", "Content-Type": "application/json"}
+
+
 def grok_headers() -> dict:
     return {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
 
@@ -345,28 +371,18 @@ def _reapi_resolution(res: str) -> str:
     return _REAPI_RESOLUTIONS.get(res, "768P")
 
 
-def submit_h3(
+def _submit_reapi(
     prompt: str,
     duration: int,
     resolution: str,
     ref_url: str | None,
-    ref_mode: str = "first_frame",
+    ref_mode: str,
 ) -> tuple[str | None, str | None]:
-    """Submit a scene to reAPI's minimax-h3 endpoint.
+    """reAPI implementation of submit_h3. Returns (task_id, error).
 
     ref_url must be a public https URL — reAPI rejects data URLs. When ref_url is
     provided, aspect_ratio is omitted (orientation derives from the source image).
-    content_filter is disabled unconditionally; that is the entire reason we picked
-    reAPI over MiniMax direct.
-
-    ref_mode selects how the reference image is used:
-      - "first_frame": legacy image-to-video (I2V) mode. The reference IS the
-        literal opening frame. Correct for scene-chaining (last frame of scene N
-        becomes first frame of scene N+1).
-      - "subject": reference-to-video (R2V) mode via reference_image_urls. The
-        reference anchors character identity but is NOT the opening frame.
-        Correct for scene 0 when the user picks a promo/cast photo — avoids
-        showing that photo as the first ~0.5s of the video.
+    content_filter is disabled unconditionally.
     """
     body: dict = {
         "model": "minimax-h3",
@@ -376,13 +392,9 @@ def submit_h3(
         "content_filter": False,
     }
     if ref_url and ref_mode == "subject":
-        # R2V: reference_image_urls anchors identity without becoming the first
-        # frame. aspect_ratio defaults to "adaptive" and is optional here — we
-        # pass 16:9 explicitly so the output matches the rest of the pipeline.
         body["reference_image_urls"] = [ref_url]
         body["aspect_ratio"] = "16:9"
     elif ref_url:
-        # I2V: legacy first-frame chaining path.
         body["first_frame_url"] = ref_url
     else:
         body["aspect_ratio"] = "16:9"
@@ -391,7 +403,6 @@ def submit_h3(
     except Exception as e:  # noqa: BLE001
         return None, f"network error: {e}"
     if r.status_code >= 300:
-        # reAPI error shape: {"error": {"code": int, "message": str, "request_id": str}}
         try:
             err_obj = r.json().get("error") or {}
             msg = err_obj.get("message") or r.text[:400]
@@ -402,19 +413,127 @@ def submit_h3(
     tid = data.get("id")
     if not tid:
         return None, f"reapi no id in response: {data}"
-    return tid, None
+    # Namespace the task id so fetch_task can route it back to the right provider.
+    return f"reapi:{tid}", None
 
 
-def fetch_task(task_id: str) -> dict:
-    """Poll reAPI task status. Returns a dict shaped like the old MiniMax response so
-    render_one_scene doesn't need to change: {status, content: {url}, error: {message}}.
+# fal.ai H3 durations are integers, resolutions are enums differing by endpoint.
+# H3 Max (fast, 768p only): 480P, 768P. Standard H3 R2V/I2V (slower, up to 2K):
+# 480P, 768P, 2K, 4K. We map the frontend's resolution string to whichever the
+# chosen fal endpoint accepts.
+_FAL_MAX_RESOLUTIONS = {"480P": "480P", "768P": "768P", "1080P": "768P", "2K": "768P", "4K": "768P"}
+_FAL_STD_RESOLUTIONS = {"480P": "480P", "768P": "768P", "1080P": "2K", "2K": "2K", "4K": "4K"}
 
-    reAPI's raw shape is {id, status: processing|completed|failed, output: {video_urls},
-    error: {code, message}, usage: {credits}}. Statuses are remapped to succeeded/failed/running
-    to match the legacy contract downstream.
+
+def _submit_fal(
+    prompt: str,
+    duration: int,
+    resolution: str,
+    ref_url: str | None,
+    ref_mode: str,
+) -> tuple[str | None, str | None]:
+    """fal.ai implementation of submit_h3. Returns (task_id, error).
+
+    Endpoint selection:
+      - No ref_url:                     minimax/h3-max/text-to-video       (fast, ~6s)
+      - ref_url + ref_mode='first_frame': minimax/h3-max/image-to-video    (fast, ~7s)
+      - ref_url + ref_mode='subject':    minimax/h3/reference-to-video     (slower, ~3min)
+
+    The 'subject' path uses standard H3 (not Max) because H3 Max does not yet have
+    a reference-to-video variant. This is only used for scene 0 identity anchoring,
+    so it's one slow call per multi-scene job; subsequent scenes chain via i2v.
+
+    Task IDs are returned namespaced as 'fal:{endpoint}:{request_id}' so fetch_task
+    can rebuild the correct status/response URLs.
     """
+    # Route to the right endpoint.
+    if ref_url and ref_mode == "subject":
+        endpoint = "minimax/h3/reference-to-video"
+        body: dict = {
+            "prompt": prompt,
+            "reference_image_urls": [ref_url],
+            "resolution": _FAL_STD_RESOLUTIONS.get(resolution, "768P"),
+            "duration": duration,
+            "aspect_ratio": "16:9",
+            # Undocumented on fal — safety_checker default is true. Set to false
+            # so we get the same posture as reAPI's content_filter:false. If fal
+            # ignores it we'll see rejected prompts in logs and can re-decide.
+            "enable_safety_checker": False,
+        }
+    elif ref_url:
+        endpoint = "minimax/h3-max/image-to-video"
+        body = {
+            "prompt": prompt,
+            "image_url": ref_url,
+            "resolution": _FAL_MAX_RESOLUTIONS.get(resolution, "768P"),
+            "duration": duration,
+            "prompt_expansion_mode": "balanced",
+            "enable_safety_checker": False,
+        }
+    else:
+        endpoint = "minimax/h3-max/text-to-video"
+        body = {
+            "prompt": prompt,
+            "resolution": _FAL_MAX_RESOLUTIONS.get(resolution, "768P"),
+            "duration": duration,
+            "aspect_ratio": "16:9",
+            "prompt_expansion_mode": "balanced",
+            "enable_safety_checker": False,
+        }
+
     try:
-        r = requests.get(f"{BASE}/tasks/{task_id}", headers=headers(), timeout=30)
+        r = requests.post(f"{FAL_BASE}/{endpoint}", headers=fal_headers(), json=body, timeout=60)
+    except Exception as e:  # noqa: BLE001
+        return None, f"network error: {e}"
+    if r.status_code >= 300:
+        try:
+            err_obj = r.json()
+            msg = err_obj.get("detail") or err_obj.get("message") or r.text[:400]
+            if isinstance(msg, list):
+                msg = "; ".join(str(m) for m in msg)
+        except Exception:  # noqa: BLE001
+            msg = r.text[:400]
+        return None, f"fal http {r.status_code}: {msg}"
+    data = r.json()
+    req_id = data.get("request_id")
+    if not req_id:
+        return None, f"fal no request_id in response: {str(data)[:400]}"
+    return f"fal:{endpoint}:{req_id}", None
+
+
+def submit_h3(
+    prompt: str,
+    duration: int,
+    resolution: str,
+    ref_url: str | None,
+    ref_mode: str = "first_frame",
+) -> tuple[str | None, str | None]:
+    """Submit a scene to the active video provider.
+
+    Returns (task_id, error). The task_id is namespaced ("fal:..." or "reapi:...")
+    so fetch_task can route the poll back to the right backend. Callers should
+    treat task_id as opaque.
+
+    ref_mode selects how the reference image is used:
+      - "first_frame": image-to-video (I2V). The reference IS the literal opening
+        frame. Correct for scene-chaining (last frame of scene N becomes first
+        frame of scene N+1).
+      - "subject": reference-to-video (R2V). The reference anchors character
+        identity but is NOT the opening frame. Correct for scene 0 when the user
+        picks a promo/cast photo.
+    """
+    if VIDEO_PROVIDER == "fal" and FAL_KEY:
+        return _submit_fal(prompt, duration, resolution, ref_url, ref_mode)
+    # Explicit reAPI or fal misconfigured — fall through.
+    if not API_KEY:
+        return None, "no video provider configured: set FAL_KEY or REAPI_API_KEY"
+    return _submit_reapi(prompt, duration, resolution, ref_url, ref_mode)
+
+
+def _fetch_reapi(raw_id: str) -> dict:
+    """Poll reAPI task status. See fetch_task for the returned shape contract."""
+    try:
+        r = requests.get(f"{BASE}/tasks/{raw_id}", headers=headers(), timeout=30)
     except Exception:  # noqa: BLE001
         return {}
     if r.status_code != 200:
@@ -435,6 +554,78 @@ def fetch_task(task_id: str) -> dict:
     if err:
         out["error"] = {"message": err.get("message", "generation failed")}
     return out
+
+
+def _fetch_fal(endpoint: str, request_id: str) -> dict:
+    """Poll fal.ai queue for a request. See fetch_task for the returned shape contract.
+
+    fal exposes status_url and response_url paths derived from the endpoint prefix.
+    For 'minimax/h3-max/text-to-video' the request path becomes
+    'minimax/h3-max/requests/{request_id}/status'.
+    """
+    # Trim the trailing task suffix (text-to-video / image-to-video / reference-to-video)
+    # so the request URL matches fal's format: {model_prefix}/requests/{id}[/status].
+    prefix = endpoint.rsplit("/", 1)[0]
+    status_url = f"{FAL_BASE}/{prefix}/requests/{request_id}/status"
+    response_url = f"{FAL_BASE}/{prefix}/requests/{request_id}"
+    try:
+        sr = requests.get(status_url, headers=fal_headers(), timeout=30)
+    except Exception:  # noqa: BLE001
+        return {}
+    if sr.status_code != 200:
+        return {}
+    sj = sr.json()
+    st = sj.get("status", "IN_QUEUE")
+    mapped = {
+        "IN_QUEUE": "queued",
+        "IN_PROGRESS": "running",
+        "COMPLETED": "succeeded",
+        "FAILED": "failed",
+    }.get(st, "running")
+    out: dict = {"status": mapped}
+    if mapped == "succeeded":
+        try:
+            rr = requests.get(response_url, headers=fal_headers(), timeout=30)
+            res = rr.json()
+            vid = (res.get("video") or {}).get("url")
+            if vid:
+                out["content"] = {"url": vid}
+            else:
+                out = {"status": "failed", "error": {"message": f"fal returned no video url: {str(res)[:300]}"}}
+        except Exception as e:  # noqa: BLE001
+            out = {"status": "failed", "error": {"message": f"fal result fetch failed: {e}"}}
+    elif mapped == "failed":
+        # fal's status endpoint carries logs; the error message is usually in logs[-1].
+        logs = sj.get("logs") or []
+        msg = "fal generation failed"
+        if logs and isinstance(logs, list):
+            last = logs[-1]
+            if isinstance(last, dict):
+                msg = last.get("message") or msg
+            elif isinstance(last, str):
+                msg = last
+        out["error"] = {"message": msg}
+    return out
+
+
+def fetch_task(task_id: str) -> dict:
+    """Poll a submitted job. Returns a dict shaped like the old MiniMax response
+    so render_one_scene doesn't need to know which provider was used:
+    {status: succeeded|running|queued|failed, content: {url}, error: {message}}.
+
+    task_id is namespaced by submit_h3 as either 'reapi:<id>' or 'fal:<endpoint>:<id>'.
+    Legacy unprefixed ids are assumed to be reAPI ids for backwards compatibility
+    with any in-flight jobs during the migration.
+    """
+    if task_id.startswith("fal:"):
+        # fal:{endpoint}:{request_id} where endpoint contains slashes.
+        _, rest = task_id.split(":", 1)
+        endpoint, request_id = rest.rsplit(":", 1)
+        return _fetch_fal(endpoint, request_id)
+    if task_id.startswith("reapi:"):
+        return _fetch_reapi(task_id[len("reapi:"):])
+    # Legacy unnamespaced ids (in-flight during migration) — reAPI.
+    return _fetch_reapi(task_id)
 
 
 def plan_scenes(total_seconds: int) -> list[int]:
@@ -570,9 +761,20 @@ def _download_video(url: str, out_path: Path) -> tuple[bool, str]:
 POLL_FAST_S = 3      # first 60s of a scene
 POLL_SLOW_S = 5      # after 60s
 POLL_SWITCH_S = 60   # when to switch from fast to slow
+# fal H3 Max finishes in ~6–10s so we start much tighter. Reference-to-video
+# on standard H3 takes minutes and reverts to the slow interval.
+FAL_POLL_TIGHT_S = 1.5
+FAL_POLL_MEDIUM_S = 3
+FAL_POLL_TIGHT_UNTIL_S = 30
 
 
 def _poll_interval(elapsed: float) -> float:
+    if VIDEO_PROVIDER == "fal":
+        if elapsed < FAL_POLL_TIGHT_UNTIL_S:
+            return FAL_POLL_TIGHT_S
+        if elapsed < POLL_SWITCH_S:
+            return FAL_POLL_MEDIUM_S
+        return POLL_SLOW_S
     return POLL_FAST_S if elapsed < POLL_SWITCH_S else POLL_SLOW_S
 
 
@@ -1922,6 +2124,9 @@ def provider_status():
         "xai_model": _fr.XAI_MODEL if _fr.XAI_API_KEY else None,
         "xai_image_model": _fr.XAI_IMAGE_MODEL if _fr.XAI_API_KEY else None,
         "reapi_key": bool(API_KEY),
+        "fal_key": bool(FAL_KEY),
+        "video_provider": VIDEO_PROVIDER,
+        "active_provider": ("fal" if VIDEO_PROVIDER == "fal" and FAL_KEY else "reapi"),
         "public_origin": bool(PUBLIC_ORIGIN),
         "resend_email": bool(os.environ.get("RESEND_API_KEY")),
         "email_from": EMAIL_FROM if os.environ.get("RESEND_API_KEY") else None,
