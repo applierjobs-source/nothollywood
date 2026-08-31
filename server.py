@@ -1326,15 +1326,36 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
     # fails, we ship the unwatermarked scene rather than losing the whole render.
     # This protects against Railway rebuilds where the apt package didn't
     # install cleanly and against edge-case ffmpeg filter errors.
+    #
+    # Either way we finish with a faststart remux so the moov atom is at the
+    # front of the file. Without this browsers can't start playback until the
+    # whole file has downloaded — that's the "ready but won't play, then plays
+    # after a moment" bug users were reporting.
     if ok:
         wm_ok, wm_err = apply_watermark(unwatermarked, dest)
         if not wm_ok:
-            print(f"[render {job_id}] watermark failed ({wm_err[:200]}) \u2014 shipping unwatermarked")
+            print(f"[render {job_id}] watermark failed ({wm_err[:200]}) \u2014 shipping unwatermarked with faststart remux")
             try:
-                import shutil
-                shutil.copy(unwatermarked, dest)
+                remux = subprocess.run(
+                    [
+                        "ffmpeg", "-y", "-i", str(unwatermarked),
+                        "-c", "copy", "-movflags", "+faststart",
+                        str(dest),
+                    ],
+                    capture_output=True, timeout=120,
+                )
+                if remux.returncode != 0:
+                    # Remux failed too — fall back to raw copy so we still
+                    # ship SOMETHING. Playback will be slow-start but working.
+                    import shutil
+                    shutil.copy(unwatermarked, dest)
+                    print(f"[render {job_id}] faststart remux failed ({remux.stderr.decode(errors='ignore')[-200:]}) \u2014 shipped without faststart")
             except Exception as e:
-                ok, err = False, f"copy-unwatermarked failed: {e}"
+                try:
+                    import shutil
+                    shutil.copy(unwatermarked, dest)
+                except Exception as e2:
+                    ok, err = False, f"copy-unwatermarked failed: {e2} (after remux exception: {e})"
 
     j = JOBS.get(job_id)
     if not j:
