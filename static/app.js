@@ -1207,10 +1207,21 @@ function renderTile(job) {
       </div>
     `;
   }
-  // Finished
+  // Finished.
+  //
+  // Thumbnail strategy: browsers with preload="metadata" often paint nothing
+  // until enough of the video is buffered to render frame 0.8 — that's why
+  // tiles were going black and then "popping in." Two fixes here:
+  //   1) poster=<jpg> when we have a real thumb (library rows have one from
+  //      Supabase; showcase clips have static/showcase/*.jpg alongside the
+  //      mp4). Poster paints instantly, no video decode needed.
+  //   2) preload="none" for anything without a poster — lets the black
+  //      fallback show immediately and defer the mp4 fetch until hover.
+  const poster = job.thumb || job.poster || "";
+  const videoPreload = poster ? "none" : "metadata";
   return `
     <div class="tile" data-id="${escapeHtml(job.id)}" data-open="1">
-      <video class="tile-video" src="${escapeHtml(job.video)}#t=0.8" muted preload="metadata" playsinline></video>
+      <video class="tile-video" src="${escapeHtml(job.video)}#t=0.8" ${poster ? `poster="${escapeHtml(poster)}"` : ""} muted preload="${videoPreload}" playsinline></video>
       <div class="tile-gradient"></div>
       <span class="tile-badge">${escapeHtml(formatDuration(job.duration))}</span>
       <button class="tile-download" data-download="1" data-url="${escapeHtml(job.video)}" data-id="${escapeHtml(job.id)}" title="Download" aria-label="Download video">
@@ -1231,11 +1242,17 @@ function renderTile(job) {
   `;
 }
 
-// Hover preview: play the tile video muted while hovered
+// Hover preview: play the tile video muted while hovered.
+// If the video was set to preload="none" for the poster-first path,
+// bump preload to "auto" on first hover so play() has data to work with.
 function wireTileHover(container) {
   container.addEventListener("mouseover", (e) => {
     const v = e.target.closest(".tile")?.querySelector(".tile-video");
-    if (v) { v.currentTime = 0.8; v.play().catch(() => {}); }
+    if (v) {
+      if (v.preload === "none") v.preload = "auto";
+      v.currentTime = 0.8;
+      v.play().catch(() => {});
+    }
   });
   container.addEventListener("mouseout", (e) => {
     const t = e.target.closest(".tile");
@@ -1519,6 +1536,7 @@ const SHOWCASE_JOBS = [
     duration: 8,
     resolution: "1080P",
     video: "static/showcase/showcase_sitcom.mp4",
+    poster: "static/showcase/showcase_sitcom.jpg",
     created_at: Math.floor(Date.now() / 1000) - 3600 * 2,
     finished_at: Math.floor(Date.now() / 1000) - 3600 * 2,
   },
@@ -1529,6 +1547,7 @@ const SHOWCASE_JOBS = [
     duration: 8,
     resolution: "1080P",
     video: "static/showcase/showcase_animated.mp4",
+    poster: "static/showcase/showcase_animated.jpg",
     created_at: Math.floor(Date.now() / 1000) - 3600 * 6,
     finished_at: Math.floor(Date.now() / 1000) - 3600 * 6,
   },
@@ -1539,6 +1558,7 @@ const SHOWCASE_JOBS = [
     duration: 8,
     resolution: "1080P",
     video: "static/showcase/showcase_truecrime.mp4",
+    poster: "static/showcase/showcase_truecrime.jpg",
     created_at: Math.floor(Date.now() / 1000) - 3600 * 18,
     finished_at: Math.floor(Date.now() / 1000) - 3600 * 18,
   },
@@ -1549,6 +1569,7 @@ const SHOWCASE_JOBS = [
     duration: 8,
     resolution: "1080P",
     video: "static/showcase/showcase_scifi.mp4",
+    poster: "static/showcase/showcase_scifi.jpg",
     created_at: Math.floor(Date.now() / 1000) - 3600 * 26,
     finished_at: Math.floor(Date.now() / 1000) - 3600 * 26,
   },

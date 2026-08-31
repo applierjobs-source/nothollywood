@@ -1425,6 +1425,17 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
         j["status"] = "done"
         j["video"] = f"/static/videos/{job_id}.mp4"
         j["finished_at"] = time.time()
+        # Extract a JPEG poster next to the mp4 so the frontend tile can paint
+        # instantly instead of waiting for the video to decode frame 0.8. Same
+        # ffmpeg helper the library upload uses — keeps the two paths in sync.
+        # Best-effort; a missing thumb just falls back to the old preload path.
+        try:
+            import library as _lib
+            thumb_dest = dest.with_suffix(".jpg")
+            if _lib._extract_thumbnail(dest, thumb_dest):
+                j["thumb"] = f"/static/videos/{job_id}.jpg"
+        except Exception as _e:
+            print(f"[render {job_id}] local thumbnail extraction failed (non-fatal): {_e}")
         # Persist to user library (best-effort; never fails the render).
         # Anonymous jobs (no user_id) are skipped inside save_render_to_library.
         try:
