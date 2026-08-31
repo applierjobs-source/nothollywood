@@ -880,6 +880,16 @@ function renderMeta(job) {
   if (job.finished_at) {
     bits.push(`<span class="chip">${timeAgo(job.finished_at)}</span>`);
   }
+  // Show + cast chips: only present when Grok casting ran (franchise renders).
+  // The cast chip is marked so users can see who Grok picked and tell us if
+  // it got the wrong character — the whole reason this UI exists.
+  if (job.show_title) {
+    bits.push(`<span class="chip" title="Detected show">${escapeHtml(job.show_title)}</span>`);
+  }
+  if (Array.isArray(job.cast) && job.cast.length) {
+    const castLabel = job.cast.map(escapeHtml).join(", ");
+    bits.push(`<span class="chip chip-cast" title="Characters Grok cast for scene 1. Tell us if this is wrong.">Cast: ${castLabel}</span>`);
+  }
   return bits.join(" ");
 }
 

@@ -1261,8 +1261,11 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
         except Exception as e:  # noqa: BLE001
             print(f"[render {job_id}] show-title extraction crashed: {e}")
             show_title = None
+        cast_names: list[str] = []
         if show_title and PUBLIC_ORIGIN:
             try:
+                from franchise_ref import _llm_extract_scene_characters
+                cast_names = list(_llm_extract_scene_characters(show_title, s0_prompt))
                 char_refs = resolve_scene_character_refs(
                     show_title, s0_prompt,
                     franchise_refs_dir=FRANCHISE_REFS,
@@ -1270,9 +1273,21 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
                 )
                 if char_refs:
                     keyframe_refs = char_refs
-                    print(f"[render {job_id}] scene 0 using {len(char_refs)} character ref(s) for '{show_title}'")
+                    print(f"[render {job_id}] scene 0 using {len(char_refs)} character ref(s) for '{show_title}': {cast_names}")
             except Exception as e:  # noqa: BLE001
                 print(f"[render {job_id}] character-ref resolution crashed: {e}")
+
+        # Persist cast + show on the job record so the frontend can render
+        # the cast chip strip. Do this even when char-ref generation failed
+        # (partial or total) so the user still sees who Grok cast, and can
+        # tell us if Grok picked wrong.
+        j2 = JOBS.get(job_id)
+        if j2 is not None:
+            if show_title:
+                j2["show_title"] = show_title
+            if cast_names:
+                j2["cast"] = cast_names
+            save_jobs(JOBS)
 
         # Fall back to the user-picked reference (group cast frame or user
         # upload) when we don't have character-specific refs.
