@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from auth import require_user, get_user
-from prompt_expander import expand_prompt
+from prompt_expander import expand_prompt, plan_outline
 from franchise_ref import (
     resolve_franchise_ref,
     resolve_scene_character_refs,
@@ -1090,7 +1090,13 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
             "notes": "scene prompts approved by user in preview step",
         }
     else:
-        expansion = expand_prompt(prompt, scenes)
+        # Long-form renders (>=60s) will have a pre-approved story outline
+        # sitting on the JOBS record from the /api/plan approval gate. When
+        # present, hand it to expand_prompt so scenes follow the A/B story
+        # structure the user approved. Short renders pass None and get the
+        # legacy one-shot expansion.
+        approved_outline = (JOBS.get(job_id) or {}).get("preapproved_outline")
+        expansion = expand_prompt(prompt, scenes, outline=approved_outline)
         scene_prompts_expanded = expansion["scenes"]
 
     _jobx = JOBS.get(job_id)
@@ -2013,8 +2019,31 @@ async def plan(
             except Exception as e:
                 print(f"[/api/plan] xai fallback failed for '{title}': {e}")
 
-    # Storyboard: run the prompt expander now so the user sees the actual
-    # per-scene prompts and can edit them before render.
+    # For long-form renders (>= 60s), do a two-pass workflow: return only
+    # the story outline for the user to approve/edit, and defer scene
+    # expansion until /api/generate is called with the approved outline.
+    # This gives users real subplot structure (A-story + B-story + tag)
+    # instead of 100+ continuous-action prompts, and lets them catch bad
+    # casting for ~1¢ instead of after a $6 render.
+    #
+    # For short renders (< 60s / < 10 scenes) the outline gate would just
+    # slow down the fun — skip straight to scene expansion as before.
+    use_outline = duration >= 60
+    if use_outline:
+        outline_result = plan_outline(prompt)
+        return {
+            "title": title,
+            "slug": slug,
+            "scenes_plan": scenes_plan,
+            "outline": outline_result.get("outline"),
+            "outline_ok": outline_result.get("ok", False),
+            "outline_provider": outline_result.get("provider"),
+            "outline_error": outline_result.get("error"),
+            "candidates": candidates,
+            "mode": "outline",  # frontend renders the approval card
+        }
+
+    # Short renders: one-shot expansion, same as before.
     expansion = expand_prompt(prompt, scenes_plan)
     return {
         "title": title,
@@ -2027,6 +2056,7 @@ async def plan(
         "characters": expansion.get("characters"),
         "notes": expansion.get("notes"),
         "candidates": candidates,
+        "mode": "scenes",  # frontend renders the storyboard as before
     }
 
 
@@ -2237,6 +2267,7 @@ async def generate(
     # legacy single-step path (no preview) still works.
     chosen_ref_url: str = Form(""),
     chosen_scenes: str = Form(""),   # JSON array of scene prompt strings
+    chosen_outline: str = Form(""),  # JSON outline dict from /api/plan (long form)
 ):
     # Auth gate: require a signed-in Supabase user. Falls back to the legacy
     # shared password if SITE_PASSWORD is set (break-glass only).
@@ -2340,6 +2371,20 @@ async def generate(
         except json.JSONDecodeError:
             raise HTTPException(400, "chosen_scenes is not valid JSON")
 
+    # Pre-approved story outline from /api/plan (long-form two-pass flow).
+    # Only used when the worker runs its own expansion — if the user already
+    # sent chosen_scenes we honor those verbatim and ignore the outline.
+    preapproved_outline: dict | None = None
+    if chosen_outline and not preapproved_scene_prompts:
+        try:
+            parsed_outline = json.loads(chosen_outline)
+            if isinstance(parsed_outline, dict):
+                preapproved_outline = parsed_outline
+            else:
+                raise HTTPException(400, "chosen_outline must be a JSON object")
+        except json.JSONDecodeError:
+            raise HTTPException(400, "chosen_outline is not valid JSON")
+
     # Save uploaded reference under /static/frames/ so reAPI can fetch it.
     ref_url: str | None = None
     ref_source: str = "none"  # "upload" | "franchise" | "chosen" | "none"
@@ -2395,6 +2440,7 @@ async def generate(
         "ref_source": ref_source,
         "ref_url": ref_url,
         "preapproved_scene_prompts": preapproved_scene_prompts,
+        "preapproved_outline": preapproved_outline,
         "credits_debited": credits_debited,  # for refund on failure
         "credits_refunded": False,
     }

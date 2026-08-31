@@ -200,12 +200,22 @@ def _known_character_hint(prompt: str) -> str | None:
     return None
 
 
-def expand_prompt(prompt: str, scene_durations: list[int]) -> dict[str, Any]:
+def expand_prompt(
+    prompt: str,
+    scene_durations: list[int],
+    outline: dict | None = None,
+) -> dict[str, Any]:
     """Expand a user prompt into a per-scene prompt list using an LLM.
 
     Args:
         prompt: The user's raw episode idea.
         scene_durations: The pre-computed per-scene durations (seconds).
+        outline: Optional pre-approved story outline from plan_outline().
+            When present, we hand it to the LLM as the authoritative story
+            structure and ask for scene prompts that follow it — A-story
+            scenes cut between B-story scenes, cold-open first, tag last.
+            Without an outline (short renders), we use the original
+            one-shot behavior.
 
     Returns:
         {
@@ -235,6 +245,28 @@ def expand_prompt(prompt: str, scene_durations: list[int]) -> dict[str, Any]:
     )
     if hint:
         user_msg += f"\nCanonical reference for this franchise:\n{hint}\n"
+
+    # If we have a pre-approved outline, hand it to the LLM as the story
+    # blueprint. We ask it to distribute the N scenes across the cold open,
+    # A-story beats, B-story beats, and tag — cutting between A and B as a
+    # real sitcom would.
+    if outline:
+        user_msg += (
+            "\nPre-approved story outline (follow this exactly, cutting "
+            "between A-story and B-story scenes as a sitcom would):\n"
+            + json.dumps(outline, indent=2)
+            + "\n\nDistribute the scenes roughly:\n"
+            "- Scene 1: cold open\n"
+            "- ~55% of remaining scenes to A-story beats (in order)\n"
+            "- ~35% of remaining scenes to B-story beats (in order)\n"
+            "- Interleave A and B scenes as cuts (A, A, B, A, B, B, A, ...) "
+            "so both stories progress in parallel. Don't render all A then all B.\n"
+            "- Last scene: tag\n"
+            "- Each scene prompt should reference which story thread it "
+            "belongs to at the start of the prompt (e.g. 'A-STORY BEAT 2:' "
+            "or 'B-STORY BEAT 1:' or 'COLD OPEN:' or 'TAG:').\n"
+        )
+
     user_msg += (
         "\nReturn a JSON object with keys: style, characters, scenes "
         f"(array of exactly {n} strings), notes."
@@ -387,6 +419,246 @@ def _fallback(prompt: str, scene_durations: list[int], t0: float, error: str) ->
         "characters": hint,
         "scenes": scenes,
         "notes": "",
+        "provider": "fallback",
+        "latency_ms": int((time.time() - t0) * 1000),
+        "error": error,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Story outline planner (Pass 1 of two-pass long-form workflow)
+# ---------------------------------------------------------------------------
+#
+# Why this exists:
+#   For short renders (< 60s / < 10 scenes) our one-shot expander produces
+#   fine results — the video is essentially one continuous beat and needs no
+#   story architecture.
+#
+#   For long renders (>= 60s / >= 10 scenes) the one-shot expander produces
+#   120 continuous-action prompts with no dramatic arc. A real sitcom episode
+#   is cold-open + A-story + B-story + tag, with the stories cutting back
+#   and forth. Without that structure a 20-min render is one long monologue
+#   with no tension.
+#
+# Two-pass flow:
+#   1. plan_outline(prompt) — Grok returns a structured outline (cheap, ~3s).
+#   2. USER APPROVES/EDITS the outline in the UI.
+#   3. expand_prompt(prompt, durations, outline=...) — one prompt per scene,
+#      each scene tagged with which story thread it belongs to.
+#
+# The outline is intentionally short (~500 tokens) so it's cheap enough that
+# users don't feel penalized for looking at it before committing to a render.
+
+OUTLINE_TIMEOUT = 20.0
+
+OUTLINE_SYSTEM_PROMPT = """You are a TV sitcom writer's-room outliner.
+
+Given a user's episode idea, produce a structured story outline in the shape
+of a real 22-minute sitcom episode. The outline will be shown to the user
+for approval before we generate 100+ scenes of video, so it must be tight,
+readable, and honest about what the episode is actually about.
+
+Output shape (JSON, no prose):
+{
+  "logline": "one-sentence pitch of the whole episode",
+  "cold_open": {
+    "beat": "one-sentence description of the pre-title scene",
+    "characters": ["Char1", "Char2"]
+  },
+  "a_story": {
+    "title": "3-5 word A-story title",
+    "premise": "one sentence, what this story is about",
+    "beats": [
+      "Beat 1: setup",
+      "Beat 2: complication",
+      "Beat 3: escalation",
+      "Beat 4: turn / climax",
+      "Beat 5: resolution"
+    ],
+    "characters": ["Char1", "Char2"]
+  },
+  "b_story": {
+    "title": "3-5 word B-story title",
+    "premise": "one sentence, what this story is about",
+    "beats": [
+      "Beat 1: setup",
+      "Beat 2: complication",
+      "Beat 3: turn",
+      "Beat 4: resolution"
+    ],
+    "characters": ["Char3", "Char4"]
+  },
+  "tag": {
+    "beat": "one-sentence description of the post-credits tag",
+    "characters": ["Char1"]
+  },
+  "notes": "any writer-room notes: real-figure substitutions, subplots dropped for length, etc."
+}
+
+Rules:
+- A-story is always the main story implied by the user's prompt.
+- B-story must be genuinely PARALLEL — a different set of characters doing
+  a different thing that pays off separately. Do NOT make the B-story a
+  sub-scene of the A-story.
+- The B-story can lightly cross over with the A-story in one beat if it
+  serves the ending.
+- If the user's prompt is a franchise show (Seinfeld, The Office, Family
+  Guy, South Park, etc.), cast the outline from that show's canonical
+  characters. Use the group whose absence would make the episode NOT feel
+  like an episode of that show. For Seinfeld default to Jerry/George/
+  Elaine/Kramer; for The Office default to Michael/Dwight/Jim/Pam; for
+  Family Guy default to Peter/Lois/Stewie/Brian; etc. Use Newman, Toby,
+  etc. only when the story specifically calls for them.
+- Do not invent characters that don't exist in the source show. For
+  original prompts, invent whatever characters serve the story and
+  describe them in the character list.
+- If the user names a real public figure, replace with a fictional analog
+  in the outline and mention this in `notes` — the video model will refuse
+  real-figure prompts and the whole render will fail.
+- Cold open should be a small self-contained moment that hints at the
+  episode's theme without giving away the A-story.
+- Tag should be a short post-credits button — often a callback to the
+  cold open or a B-story character reacting to what happened.
+
+Output ONLY the JSON object, no prose."""
+
+
+def plan_outline(prompt: str) -> dict[str, Any]:
+    """Pass 1 of the two-pass long-form workflow: return a structured story
+    outline for the user to approve/edit before we generate scene prompts.
+
+    Args:
+        prompt: The user's raw episode idea.
+
+    Returns:
+        {
+            "ok": bool,
+            "outline": dict | None,     # the parsed outline JSON
+            "provider": str,            # "grok" | "anthropic" | "fallback"
+            "latency_ms": int,
+            "error": str | None,
+        }
+
+    Never raises. On any LLM failure returns ok=False with a fallback
+    outline shape so the frontend still has something to render.
+    """
+    t0 = time.time()
+    selected = _select_provider()
+    if selected is None:
+        return _outline_fallback(prompt, t0, "no LLM key set (XAI_API_KEY or ANTHROPIC_API_KEY)")
+    provider_name, url, model, headers = selected
+
+    hint = _known_character_hint(prompt)
+    user_msg = f"User episode idea:\n{prompt.strip()}\n"
+    if hint:
+        user_msg += f"\nCanonical reference for this franchise:\n{hint}\n"
+    user_msg += "\nReturn the JSON outline."
+
+    try:
+        r = requests.post(
+            url,
+            headers=headers,
+            json={
+                "model": model,
+                "max_tokens": 2000,
+                "system": OUTLINE_SYSTEM_PROMPT,
+                "messages": [{"role": "user", "content": user_msg}],
+            },
+            timeout=OUTLINE_TIMEOUT,
+        )
+    except requests.RequestException as e:
+        return _outline_fallback(prompt, t0, f"http error ({provider_name}): {e}")
+
+    if r.status_code != 200:
+        return _outline_fallback(prompt, t0, f"{provider_name} {r.status_code}: {r.text[:200]}")
+
+    try:
+        data = r.json()
+        text_blocks = [
+            b.get("text", "")
+            for b in data.get("content", [])
+            if b.get("type") == "text"
+        ]
+        raw = "".join(text_blocks).strip()
+    except Exception as e:
+        return _outline_fallback(prompt, t0, f"parse error ({provider_name}): {e}")
+
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not m:
+        return _outline_fallback(prompt, t0, f"no JSON in response: {raw[:200]}")
+    try:
+        parsed = json.loads(m.group(0))
+    except json.JSONDecodeError as e:
+        return _outline_fallback(prompt, t0, f"invalid JSON: {e}")
+
+    # Light schema normalization — never crash, just fill missing sections.
+    outline = _normalize_outline(parsed)
+
+    return {
+        "ok": True,
+        "outline": outline,
+        "provider": provider_name,
+        "latency_ms": int((time.time() - t0) * 1000),
+        "error": None,
+    }
+
+
+def _normalize_outline(obj: dict) -> dict:
+    """Ensure the outline has all required keys with reasonable defaults."""
+    def _str(x, default=""):
+        return str(x).strip() if x else default
+    def _list(x):
+        return [str(i).strip() for i in x if str(i).strip()] if isinstance(x, list) else []
+
+    def _story(x, default_beats: int) -> dict:
+        x = x if isinstance(x, dict) else {}
+        return {
+            "title": _str(x.get("title"), "Untitled"),
+            "premise": _str(x.get("premise")),
+            "beats": _list(x.get("beats")) or [f"Beat {i+1}" for i in range(default_beats)],
+            "characters": _list(x.get("characters")),
+        }
+
+    def _short(x) -> dict:
+        x = x if isinstance(x, dict) else {}
+        return {
+            "beat": _str(x.get("beat")),
+            "characters": _list(x.get("characters")),
+        }
+
+    return {
+        "logline": _str(obj.get("logline")),
+        "cold_open": _short(obj.get("cold_open")),
+        "a_story": _story(obj.get("a_story"), 5),
+        "b_story": _story(obj.get("b_story"), 4),
+        "tag": _short(obj.get("tag")),
+        "notes": _str(obj.get("notes")),
+    }
+
+
+def _outline_fallback(prompt: str, t0: float, error: str) -> dict[str, Any]:
+    """Minimal outline so the frontend still has something to display when
+    the LLM call fails. User can still edit it before approving."""
+    return {
+        "ok": False,
+        "outline": {
+            "logline": prompt.strip()[:200],
+            "cold_open": {"beat": "", "characters": []},
+            "a_story": {
+                "title": "Main Story",
+                "premise": prompt.strip()[:200],
+                "beats": ["Setup", "Complication", "Escalation", "Turn", "Resolution"],
+                "characters": [],
+            },
+            "b_story": {
+                "title": "Subplot",
+                "premise": "",
+                "beats": ["Setup", "Complication", "Turn", "Resolution"],
+                "characters": [],
+            },
+            "tag": {"beat": "", "characters": []},
+            "notes": "(outline generation failed — you can still edit this manually)",
+        },
         "provider": "fallback",
         "latency_ms": int((time.time() - t0) * 1000),
         "error": error,

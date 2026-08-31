@@ -622,7 +622,13 @@ function openPreview(plan) {
     el.previewRefs.hidden = false;
     renderRefTiles(cands);
   }
-  renderStoryboard(plan);
+  // Long-form renders (>=60s) return an outline instead of scene prompts.
+  // Show the outline approval card; short renders keep the storyboard editor.
+  if (plan.mode === "outline" && plan.outline) {
+    renderOutline(plan);
+  } else {
+    renderStoryboard(plan);
+  }
 }
 
 function renderRefTiles(cands) {
@@ -665,6 +671,108 @@ function renderStoryboard(plan) {
     div.querySelector("textarea").value = text;
     el.previewScenes.appendChild(div);
   });
+}
+
+// Long-form (>=60s) two-pass flow: render an editable story-outline card
+// instead of the flat per-scene list. Each section (logline, cold open,
+// A-story beats, B-story beats, tag) becomes a textarea the user can edit,
+// then we JSON.stringify the edited outline back into chosen_outline when
+// they hit Approve. The backend hands it to expand_prompt so scene prompts
+// follow the approved A/B story structure.
+//
+// Note: for outline mode we hide the per-scene editor entirely — users approve
+// the story structure, not 120 individual scenes. Scene prompts get expanded
+// after Approve in the worker, using the approved outline as the blueprint.
+function renderOutline(plan) {
+  el.previewScenes.innerHTML = "";
+  const outline = plan.outline;
+  const totalScenes = (plan.scenes_plan || []).length;
+  const wrap = document.createElement("div");
+  wrap.className = "outline-card";
+
+  const errBanner = plan.outline_ok
+    ? ""
+    : `<div class="outline-warn">Outline generation used fallback (${escapeHtml(plan.outline_error || "unknown")}). Edit below to fix.</div>`;
+
+  const beatList = (beats, prefix) =>
+    (beats || [])
+      .map((b, i) => `<div class="outline-beat"><span class="outline-beat-label">${prefix} · Beat ${i + 1}</span><textarea data-key="${prefix.toLowerCase().replace(/[^a-z]/g, "")}-beat" data-idx="${i}">${escapeHtml(b)}</textarea></div>`)
+      .join("");
+
+  wrap.innerHTML = `
+    <div class="outline-hero">
+      <div class="outline-hero-eyebrow">Story Outline</div>
+      <div class="outline-hero-title">Approve the story before we render ${totalScenes} scenes</div>
+      <div class="outline-hero-sub">Edit any section. We’ll write the scene prompts from this after you approve.</div>
+    </div>
+    ${errBanner}
+    <div class="outline-section">
+      <label class="outline-label">Logline</label>
+      <textarea data-key="logline">${escapeHtml(outline.logline || "")}</textarea>
+    </div>
+    <div class="outline-section">
+      <label class="outline-label">Cold Open</label>
+      <textarea data-key="cold_open-beat">${escapeHtml(outline.cold_open?.beat || "")}</textarea>
+      <div class="outline-cast-line">Cast: ${escapeHtml((outline.cold_open?.characters || []).join(", ") || "—")}</div>
+    </div>
+    <div class="outline-section outline-a">
+      <label class="outline-label">A-Story — <input class="outline-inline" data-key="a_story-title" value="${escapeHtml(outline.a_story?.title || "")}" /></label>
+      <textarea data-key="a_story-premise" placeholder="Premise">${escapeHtml(outline.a_story?.premise || "")}</textarea>
+      ${beatList(outline.a_story?.beats, "A-STORY")}
+      <div class="outline-cast-line">Cast: ${escapeHtml((outline.a_story?.characters || []).join(", ") || "—")}</div>
+    </div>
+    <div class="outline-section outline-b">
+      <label class="outline-label">B-Story — <input class="outline-inline" data-key="b_story-title" value="${escapeHtml(outline.b_story?.title || "")}" /></label>
+      <textarea data-key="b_story-premise" placeholder="Premise">${escapeHtml(outline.b_story?.premise || "")}</textarea>
+      ${beatList(outline.b_story?.beats, "B-STORY")}
+      <div class="outline-cast-line">Cast: ${escapeHtml((outline.b_story?.characters || []).join(", ") || "—")}</div>
+    </div>
+    <div class="outline-section">
+      <label class="outline-label">Tag</label>
+      <textarea data-key="tag-beat">${escapeHtml(outline.tag?.beat || "")}</textarea>
+      <div class="outline-cast-line">Cast: ${escapeHtml((outline.tag?.characters || []).join(", ") || "—")}</div>
+    </div>
+    ${outline.notes ? `<div class="outline-notes">Writer’s notes: ${escapeHtml(outline.notes)}</div>` : ""}
+  `;
+  el.previewScenes.appendChild(wrap);
+}
+
+// Read the edited outline back out of the DOM. Returns the same shape the
+// backend sent minus any keys the user emptied. Never throws.
+function collectOutlineFromDom() {
+  const card = el.previewScenes.querySelector(".outline-card");
+  if (!card) return null;
+  const get = (sel) => (card.querySelector(sel)?.value || "").trim();
+  const getList = (prefix) =>
+    Array.from(card.querySelectorAll(`textarea[data-key="${prefix}-beat"]`))
+      .sort((a, b) => Number(a.dataset.idx) - Number(b.dataset.idx))
+      .map((t) => t.value.trim())
+      .filter(Boolean);
+  const orig = pendingPlan?.outline || {};
+  return {
+    logline: get('textarea[data-key="logline"]'),
+    cold_open: {
+      beat: get('textarea[data-key="cold_open-beat"]'),
+      characters: orig.cold_open?.characters || [],
+    },
+    a_story: {
+      title: get('input[data-key="a_story-title"]'),
+      premise: get('textarea[data-key="a_story-premise"]'),
+      beats: getList("astory"),
+      characters: orig.a_story?.characters || [],
+    },
+    b_story: {
+      title: get('input[data-key="b_story-title"]'),
+      premise: get('textarea[data-key="b_story-premise"]'),
+      beats: getList("bstory"),
+      characters: orig.b_story?.characters || [],
+    },
+    tag: {
+      beat: get('textarea[data-key="tag-beat"]'),
+      characters: orig.tag?.characters || [],
+    },
+    notes: orig.notes || "",
+  };
 }
 
 // Rotate through DDG query variants each time user clicks 'More options'.
@@ -723,9 +831,21 @@ el.previewApproveBtn.addEventListener("click", async () => {
     return;
   }
   const chosenRefUrl = selected ? selected.dataset.url : "";
-  const editedScenes = Array.from(el.previewScenes.querySelectorAll("textarea"))
-    .map((t) => t.value.trim())
-    .filter(Boolean);
+
+  // Two-mode collection: outline card (long form) vs storyboard textareas
+  // (short form). Only one is present in the DOM at a time.
+  let chosenScenes = null;
+  let chosenOutline = null;
+  if (pendingPlan.mode === "outline") {
+    chosenOutline = collectOutlineFromDom();
+  } else {
+    const editedScenes = Array.from(el.previewScenes.querySelectorAll("textarea"))
+      .map((t) => t.value.trim())
+      .filter(Boolean);
+    if (editedScenes.length === pendingPlan.scenes_plan.length) {
+      chosenScenes = editedScenes;
+    }
+  }
 
   el.previewApproveBtn.disabled = true;
   const origLabel = el.previewApproveBtn.querySelector(".btn-label").textContent;
@@ -737,7 +857,8 @@ el.previewApproveBtn.addEventListener("click", async () => {
       duration: pendingPlan._duration,
       resolution: pendingPlan._resolution,
       chosenRefUrl,
-      chosenScenes: editedScenes.length === pendingPlan.scenes_plan.length ? editedScenes : null,
+      chosenScenes,
+      chosenOutline,
     });
     closeModal(el.previewModal);
     pendingPlan = null;
@@ -749,7 +870,7 @@ el.previewApproveBtn.addEventListener("click", async () => {
   }
 });
 
-async function submitGenerate({ prompt, duration, resolution, chosenRefUrl, chosenScenes }) {
+async function submitGenerate({ prompt, duration, resolution, chosenRefUrl, chosenScenes, chosenOutline }) {
   const fd = new FormData();
   fd.append("prompt", prompt);
   fd.append("duration", String(duration));
@@ -757,6 +878,7 @@ async function submitGenerate({ prompt, duration, resolution, chosenRefUrl, chos
   if (pendingUpload) fd.append("reference", pendingUpload);
   if (chosenRefUrl) fd.append("chosen_ref_url", chosenRefUrl);
   if (chosenScenes) fd.append("chosen_scenes", JSON.stringify(chosenScenes));
+  if (chosenOutline) fd.append("chosen_outline", JSON.stringify(chosenOutline));
 
   const r = await authedFetch(`${API}/api/generate`, { method: "POST", body: fd });
   if (r.status === 401) {
