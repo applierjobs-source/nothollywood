@@ -110,6 +110,49 @@ so the model renders each scene consistently. Each scene should describe a \
 distinct beat of the story with concrete visual action, camera framing, \
 and dialogue where appropriate.
 
+SHOT BIBLE — CONSISTENCY LOCKS (very important — read this first):
+Every episode has recurring elements the video model reinvents every scene \
+unless you lock them down: a hero prop the plot revolves around, each \
+character's wardrobe for the entire episode, and the visual spec of each \
+recurring location. You MUST produce a `shot_bible` field in the JSON output \
+with the following structure so we can re-inject these locks into every \
+scene prompt downstream:
+  {
+    "hero_prop": "one sentence exact visual description of the plot object, \
+repeated verbatim in every scene where it appears (color, shape, silhouette, \
+material, brand markings). Null if the story has no single hero object.",
+    "wardrobe": {
+      "<character name>": "one sentence outfit lock for the whole episode \
+(garments, colors, footwear, glasses, watches, facial hair). Sitcom \
+characters wear the same outfit through an episode; only change it if the \
+story explicitly requires a costume change and note that in the beat."
+    },
+    "locations": {
+      "<location name>": "two-sentence canonical spec (interior/exterior, \
+lighting, key set dressing, architectural features, wall/floor colors, \
+signage). Use the franchise location cards below verbatim when they apply."
+    }
+  }
+
+Every scene prompt you write MUST already reference the hero prop's exact \
+description (not just "the shoes" — the FULL description) whenever the prop \
+is on screen, the character's wardrobe lock whenever the character is on \
+screen, and the location spec whenever the scene sets there. Don't rely on \
+the model to remember from scene 1 — it can't.
+
+ON-SCREEN TEXT RULE (very important):
+- Text-in-image models frequently render garbled gibberish signage \
+("GINNZS" instead of "MONK'S", "BATMR SHP" instead of "BARBER SHOP"). \
+When the scene features a canonical location (Monk's Café, Jerry's \
+apartment door, Central Perk, Paddy's Pub, etc.), you MUST specify the \
+EXACT text that should appear on the signage in the scene prompt and \
+add "clean legible signage typography, no garbled text" so the model \
+prioritizes readable characters.
+- For non-canonical background signage (menus, storefronts, posters), \
+prefer 'blurred out-of-focus background signage' or 'nondescript signage \
+out of focus' over an invented brand — that way we avoid gibberish text \
+completely.
+
 CRITICAL rules about audio and speech:
 - If the user prompt says a character talks, speaks, tells a story, narrates, \
 or otherwise uses spoken language, EVERY scene must maintain that they are \
@@ -299,6 +342,135 @@ _FRANCHISE_ALIASES: dict[str, str] = {
     "larry david": "curb your enthusiasm",
     "michael bluth": "arrested development", "gob bluth": "arrested development",
 }
+
+
+# ---------------------------------------------------------------------------
+# Franchise location cards — canonical set specs
+# ---------------------------------------------------------------------------
+#
+# H3 does not know what Monk's Café or Jerry's apartment look like. Left to
+# itself it renders a generic diner (often with GIBBERISH signage like
+# "GINNZS") and a generic loft (often with a Friends-style staircase). We
+# feed it a per-location card so every scene that sets there gets the SAME
+# interior every time.
+#
+# Each entry is `{location_slug: canonical_spec}` — the spec is dropped
+# verbatim into the shot bible's `locations` field for that render.
+
+_FRANCHISE_LOCATIONS: dict[str, dict[str, str]] = {
+    "seinfeld": {
+        "Monk's Café": (
+            "Interior of a NYC-style diner: green vinyl booths along the "
+            "windows, chrome counter with round red-topped stools, black-and-"
+            "white tile floor, warm tungsten pendant lighting. Signage on the "
+            "exterior window reads exactly 'MONK'S' in white block letters on "
+            "a red awning; a smaller 'RESTAURANT' sign below. Menu boards "
+            "behind the counter are blurred/out of focus. Multi-cam sitcom "
+            "staging with the front booth as the hero table."
+        ),
+        "Jerry's Apartment": (
+            "Interior of a SINGLE-FLOOR NYC walkup apartment — NO staircase, "
+            "NO loft, one open living room with a small galley kitchen behind. "
+            "Blue couch facing camera, dining table with wire-back chairs, "
+            "bike hanging on the back wall, cereal boxes lined up on top of "
+            "the fridge, off-white walls, chrome-and-glass coffee table, front "
+            "door on stage-right. Warm tungsten lighting. Multi-cam staging."
+        ),
+        "Jerry's Apartment Hallway": (
+            "Narrow NYC walkup hallway outside Jerry's apartment door — the "
+            "door is off-white with a brass '5A' plate. Fluorescent hallway "
+            "lighting, patterned carpet runner. No staircase visible in shot."
+        ),
+        "Comedy Club Stage": (
+            "Small stand-up comedy stage in front of a red-brick wall, single "
+            "microphone on a stand, warm spotlight, second empty mic stand "
+            "visible in the background."
+        ),
+    },
+    "friends": {
+        "Central Perk": (
+            "Interior of a Greenwich Village coffee house: exposed brick "
+            "walls, worn orange upholstered couch as the hero seat, mismatched "
+            "armchairs, low coffee table, chalk menu board, warm string "
+            "lights, coffee bar in the back. Front window signage reads "
+            "exactly 'CENTRAL PERK' in tan serif type. Multi-cam staging."
+        ),
+        "Monica's Apartment": (
+            "Bright purple-walled NYC apartment: kitchen at stage-right with "
+            "tile counter, dining table center, big picture window at the "
+            "back showing a NYC brick wall, wooden floor, entertainment unit "
+            "stage-left, big purple door at stage-right entrance. Multi-cam "
+            "staging."
+        ),
+    },
+    "the office": {
+        "Dunder Mifflin Bullpen": (
+            "Single-camera mockumentary interior of a mid-2000s regional paper "
+            "company: rows of gray cubicles, drop-ceiling with fluorescent "
+            "panels, beige carpet, corkboards, printers, water cooler in the "
+            "back. Muted beige/blue palette. Handheld doc-camera framing."
+        ),
+        "Michael's Office": (
+            "Glass-walled corner office off the bullpen: 'World's Best Boss' "
+            "mug on the desk, framed cheap art on the walls, mini-fridge in "
+            "the corner, cheap veneer desk, two guest chairs facing the desk."
+        ),
+        "Conference Room": (
+            "Long oval table with black office chairs, whiteboard on one wall, "
+            "projection screen, small window into the bullpen."
+        ),
+    },
+    "cheers": {
+        "Cheers Bar": (
+            "Boston basement tavern interior: dark wood bar with brass rail, "
+            "stained-glass window behind, mounted brass and neon beer signs, "
+            "round tables, warm amber lighting. Signage above the bar reads "
+            "exactly 'CHEERS' in gold serif type. Multi-cam staging."
+        ),
+    },
+    "it's always sunny": {
+        "Paddy's Pub": (
+            "Divey Philadelphia Irish bar interior: scuffed hardwood floor, "
+            "neon beer signs on brick walls, jukebox in the corner, worn "
+            "pool table, back office door. Front window signage reads "
+            "exactly 'PADDY'S PUB' in green with a shamrock. Single-camera "
+            "handheld staging."
+        ),
+    },
+    "parks and recreation": {
+        "Pawnee City Hall Office": (
+            "Single-camera mockumentary interior of a small-town municipal "
+            "office: mint green walls, wood-panel accents, folk-art posters, "
+            "beige cubicles, drop ceiling, framed portraits of local "
+            "celebrities. Mockumentary handheld framing."
+        ),
+    },
+    "the big bang theory": {
+        "Leonard and Sheldon's Apartment": (
+            "Pasadena apartment interior with a distinctive brown corduroy "
+            "couch as Sheldon's hero seat, whiteboard covered in equations, "
+            "periodic-table shower curtain visible through the hallway, IKEA "
+            "kitchen behind, comic-book art on the walls. Multi-cam staging."
+        ),
+    },
+}
+
+
+def _franchise_locations(prompt: str) -> dict[str, str] | None:
+    """Return the canonical location cards for a franchise, or None.
+
+    Same alias-first resolution as the audio signature lookup. Returns a
+    dict of {location_name: canonical_spec}. The shot bible embeds these
+    verbatim so H3 renders the SAME interior every scene.
+    """
+    p = prompt.lower()
+    for key in _FRANCHISE_LOCATIONS:
+        if key in p:
+            return _FRANCHISE_LOCATIONS[key]
+    for alias, franchise in _FRANCHISE_ALIASES.items():
+        if alias in p:
+            return _FRANCHISE_LOCATIONS.get(franchise)
+    return None
 
 
 def _franchise_audio_signature(prompt: str) -> str | None:
@@ -588,6 +760,7 @@ def expand_prompt(
 
     hint = _known_character_hint(prompt)
     audio_sig = _franchise_audio_signature(prompt)
+    loc_cards = _franchise_locations(prompt)
     user_msg = (
         f"User episode idea:\n{prompt.strip()}\n\n"
         f"Number of scenes to produce: {n}\n"
@@ -595,6 +768,14 @@ def expand_prompt(
     )
     if hint:
         user_msg += f"\nCanonical reference for this franchise:\n{hint}\n"
+    if loc_cards:
+        cards_text = "\n".join(f"- {name}: {spec}" for name, spec in loc_cards.items())
+        user_msg += (
+            f"\nCanonical franchise LOCATION CARDS (use verbatim in the "
+            f"shot_bible.locations field for any of these locations that "
+            f"appear in the story, and reference them in the scene prompts "
+            f"whenever the scene sets there):\n{cards_text}\n"
+        )
     if audio_sig:
         user_msg += (
             f"\nFranchise audio signature (embed this verbatim, or an obvious "
@@ -688,8 +869,9 @@ def expand_prompt(
             )
 
     user_msg += (
-        "\nReturn a JSON object with keys: style, characters, scenes "
-        f"(array of exactly {n} strings), notes."
+        "\nReturn a JSON object with keys: style, characters, shot_bible "
+        "(object with hero_prop, wardrobe, locations — see SHOT BIBLE rules "
+        f"above), scenes (array of exactly {n} strings), notes."
     )
 
     try:
@@ -751,8 +933,11 @@ def expand_prompt(
         if isinstance(s, dict):
             s = s.get("prompt") or s.get("text") or json.dumps(s)
         s = str(s).strip()
-        if len(s) > 1500:
-            s = s[:1500]
+        # Cap per-scene at 2500 chars — leaves room for the SHOT BIBLE header
+        # we prepend below without truncating the scene body. MiniMax H3
+        # comfortably accepts prompts in this range.
+        if len(s) > 2500:
+            s = s[:2500]
         scenes_norm.append(s)
 
     # Safety net: for long-form (outline) renders, scene 1 MUST be the opening
@@ -771,16 +956,96 @@ def expand_prompt(
         if not looks_like_opener:
             scenes_norm[0] = _franchise_opener(prompt)
 
+    # Shot bible extraction + injection.
+    #
+    # The LLM produced a shot_bible object with hero_prop / wardrobe /
+    # locations. It's supposed to reference these inline in every scene, but
+    # even a good LLM drifts ("the shoes" instead of the full description).
+    # We enforce the locks by prepending a compact SHOT BIBLE header to every
+    # scene prompt — the video model sees the exact same lock text every
+    # single render call, so props/wardrobe/locations stop shape-shifting
+    # between scenes.
+    shot_bible = parsed.get("shot_bible") or {}
+    if not isinstance(shot_bible, dict):
+        shot_bible = {}
+    # If the LLM omitted the field entirely but we have franchise location
+    # cards, seed the bible with just the location cards actually referenced
+    # in the scene prompts. Including all four Seinfeld locations when only
+    # Monk's + Jerry's Apartment appear in the story would blow the 1500-char
+    # per-scene cap once the bible header is prepended.
+    if not shot_bible.get("locations") and loc_cards:
+        joined_scenes = " ".join(scenes_norm).lower()
+        used = {
+            name: spec
+            for name, spec in loc_cards.items()
+            if name.lower().split("'")[0].strip() in joined_scenes
+            or any(tok in joined_scenes for tok in name.lower().split())
+        }
+        if used:
+            shot_bible["locations"] = used
+
+    bible_block = _format_shot_bible(shot_bible)
+    if bible_block:
+        # Scene 1 is the theme opener — pure title sequence, no locks needed.
+        # Every other scene gets the bible header prepended.
+        start_idx = 1 if (outline and scenes_norm) else 0
+        for i in range(start_idx, len(scenes_norm)):
+            scenes_norm[i] = bible_block + scenes_norm[i]
+            # Hard cap at 3500 chars post-injection so a runaway bible +
+            # scene body doesn't push us into rejected-prompt territory.
+            if len(scenes_norm[i]) > 3500:
+                scenes_norm[i] = scenes_norm[i][:3500]
+
     return {
         "ok": True,
         "style": str(parsed.get("style", "")).strip(),
         "characters": str(parsed.get("characters", "")).strip(),
+        "shot_bible": shot_bible,
         "scenes": scenes_norm,
         "notes": str(parsed.get("notes", "")).strip(),
         "provider": provider_name,
         "latency_ms": int((time.time() - t0) * 1000),
         "error": None,
     }
+
+
+def _format_shot_bible(bible: dict) -> str:
+    """Render the shot bible dict into a compact header injected into every
+    scene prompt.
+
+    The header is kept terse so it doesn't blow past MiniMax's prompt limit
+    when concatenated with the scene body. Empty sections are omitted.
+    Returns "" if the bible has no usable content.
+    """
+    parts: list[str] = []
+
+    hero = bible.get("hero_prop")
+    if isinstance(hero, str) and hero.strip() and hero.strip().lower() not in ("null", "none"):
+        parts.append(f"HERO PROP LOCK: {hero.strip()}")
+
+    wardrobe = bible.get("wardrobe")
+    if isinstance(wardrobe, dict) and wardrobe:
+        wardrobe_bits = [
+            f"{name} wears {desc.strip()}"
+            for name, desc in wardrobe.items()
+            if isinstance(desc, str) and desc.strip()
+        ]
+        if wardrobe_bits:
+            parts.append("WARDROBE LOCK: " + "; ".join(wardrobe_bits) + ".")
+
+    locations = bible.get("locations")
+    if isinstance(locations, dict) and locations:
+        loc_bits = [
+            f"{name} — {desc.strip()}"
+            for name, desc in locations.items()
+            if isinstance(desc, str) and desc.strip()
+        ]
+        if loc_bits:
+            parts.append("LOCATION LOCKS: " + " | ".join(loc_bits))
+
+    if not parts:
+        return ""
+    return "[SHOT BIBLE — keep these EXACT across every scene] " + " ".join(parts) + " [END SHOT BIBLE]\n\n"
 
 
 # Keywords that indicate spoken dialogue in the user prompt. When any of these
