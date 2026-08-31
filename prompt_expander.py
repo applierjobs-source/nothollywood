@@ -126,6 +126,43 @@ words" — never barks / meows / silent reactions unless the user asked for it.
 Mention what the character was doing at the end of the previous scene so \
 the frame-chain handoff (last-frame→first-frame) reads as one continuous shot.
 
+MUSIC AND LAUGH-TRACK RULES (very important — don't skip):
+- If a franchise audio signature is provided in the user message, embed the \
+signature verbatim in EVERY scene prompt. The model has no idea whether a \
+show has a laugh track, a slap-bass sting, or an orchestral cutaway cue \
+unless we say so per scene.
+- Multi-camera sitcoms (Seinfeld, Friends, Big Bang Theory, Cheers) MUST \
+have studio-audience laughter on punchlines with a clear pause beat before \
+the next line. Never omit this.
+- Single-camera mockumentaries (The Office, Parks and Rec, Modern Family, \
+Arrested Development, Always Sunny, Curb) MUST NEVER have a laugh track \
+and MUST NEVER have underscore music playing under dialogue.
+- Animated prime-time (Family Guy, Simpsons, American Dad) uses orchestral \
+cartoon score with musical stings on cutaways/transitions, no laugh track.
+- Adult animation (Rick and Morty, South Park, BoJack) has NO laugh track, \
+minimal or sparse music, dry comedic timing.
+- If NO franchise signature is provided but the prompt describes a sitcom-\
+style scene, default to single-camera style (no laugh track, diegetic sound \
+only). Do not invent a laugh track.
+- The first scene of an episode should mention the show's theme/opening \
+music cue briefly. The last scene should end with the show's closing music \
+sting swelling on the final beat.
+
+TRANSITION AND EDITORIAL RULES:
+- End each scene on a beat that primes the next cut (a punchline, a reaction \
+hold, an entrance, a discovery), not mid-motion.
+- If the scene brief marks the scene as COLD OPEN, end with a smash cut to \
+the theme/music sting.
+- If the scene brief marks it as TAG (last scene), end with the closing \
+music cue swelling under a held reaction shot.
+- When two consecutive scenes belong to DIFFERENT story threads (A-story \
+cutting to B-story or vice versa), the scene ending the outgoing thread \
+should end on a hard punchline/reaction and briefly mention 'hard cut to \
+[new location]' in its final beat so the transition reads editorially.
+- For act-break scenes (roughly 1/3 and 2/3 through in a long episode), \
+end on a held reaction beat with the show's music cue swelling, then \
+fade-out language.
+
 General rules:
 - Every scene prompt MUST embed the style sentence and character descriptions \
 inline. The model sees each scene in isolation — it has no shared context.
@@ -139,6 +176,162 @@ will refuse real-public-figure prompts and the whole render will fail.
 split it into N scenes but keep the user's descriptions verbatim.
 
 Output ONLY the JSON object, no prose."""
+
+
+# ---------------------------------------------------------------------------
+# Franchise audio + editorial signatures
+# ---------------------------------------------------------------------------
+#
+# H3 will happily render a Seinfeld scene without any slap-bass sting and
+# a Family Guy scene without the piano cue — it just picks whatever generic
+# music (or silence) it feels like. Same story for laugh tracks: multi-cam
+# sitcoms MUST have one on punchlines, single-cam MUST NOT, and adult
+# animation rides on musical stings and character reactions instead. The
+# model has no idea which is which unless we tell it, per scene, every time.
+#
+# This table gets injected into the system prompt so the LLM knows how to
+# write audio direction into every scene, and gets injected into fallback
+# scenes so we still get audio guidance when the LLM path fails.
+#
+# Each signature is a paragraph the LLM/model can consume verbatim, not
+# structured fields — keeps the prompt readable when it's echoed into the
+# scene brief.
+
+_FRANCHISE_AUDIO_SIGNATURES: dict[str, str] = {
+    "seinfeld": (
+        "AUDIO SIGNATURE (Seinfeld): the signature slap-bass sting between "
+        "scenes and as a music cue on punchlines. Multi-camera studio audience "
+        "— hearty studio laughter on every punchline and reaction beat, with a "
+        "clear beat of laughter pause before the next line. Warm apartment/diner "
+        "room tone, no underscore during dialogue."
+    ),
+    "family guy": (
+        "AUDIO SIGNATURE (Family Guy): brassy orchestral cartoon score with a "
+        "jaunty piano vamp on scene transitions and cutaway gags. NO laugh "
+        "track — this is animated prime-time, comedy is carried by musical "
+        "stings and character reactions. Cartoonish sound effects (boings, "
+        "honks, slide-whistles) on physical comedy beats."
+    ),
+    "the simpsons": (
+        "AUDIO SIGNATURE (The Simpsons): light Alf Clausen-style orchestral "
+        "underscore with woodwinds and brass punctuating gags. NO laugh track. "
+        "Warm suburban room tone. Character voices carry the comedy; music "
+        "stays low under dialogue and pops up on transitions."
+    ),
+    "rick and morty": (
+        "AUDIO SIGNATURE (Rick and Morty): sparse synth score with occasional "
+        "orchestral swells for cosmic beats. NO laugh track — adult animation, "
+        "comedy is dry, science-fiction ambient sound design (portal woosh, "
+        "sci-fi UI bleeps, dimensional hum) carries scene atmosphere. Music "
+        "stays out of the way of Rick's fast dialogue."
+    ),
+    "south park": (
+        "AUDIO SIGNATURE (South Park): minimal music, mostly diegetic. NO laugh "
+        "track. Kids' voices carry every beat. Cheap synthesized cues on scene "
+        "transitions, occasional guitar riff. Boys' hallway/classroom room tone "
+        "or Cartman's basement ambience underneath dialogue."
+    ),
+    "the office": (
+        "AUDIO SIGNATURE (The Office, US): single-camera mockumentary — "
+        "absolutely NO laugh track and NO underscore during dialogue. Only "
+        "diegetic sound: fluorescent hum, phones, keyboards, copier, distant "
+        "office chatter. The soft acoustic-guitar theme cue appears ONLY on "
+        "talking-head cuts or act-break transitions, never over dialogue."
+    ),
+    "parks and recreation": (
+        "AUDIO SIGNATURE (Parks and Recreation): single-camera mockumentary — "
+        "NO laugh track, NO underscore during dialogue. Diegetic office/park "
+        "ambience only. Bouncy acoustic-banjo theme cue on talking-head cuts "
+        "and act-break transitions."
+    ),
+    "the big bang theory": (
+        "AUDIO SIGNATURE (The Big Bang Theory): multi-camera studio audience — "
+        "loud studio laughter on every punchline with a clear pause beat. No "
+        "underscore during dialogue. Barenaked Ladies-style upbeat theme cue "
+        "on scene transitions only."
+    ),
+    "friends": (
+        "AUDIO SIGNATURE (Friends): multi-camera studio audience — studio "
+        "laughter and occasional applause on punchlines and character entrances. "
+        "No underscore during dialogue. Warm apartment/coffee-house room tone. "
+        "Rembrandts-style theme cue only on transitions."
+    ),
+    "cheers": (
+        "AUDIO SIGNATURE (Cheers): multi-camera studio audience — studio "
+        "laughter on punchlines and character entrances (especially Norm). Warm "
+        "bar-room ambience with clinking glasses and low chatter under dialogue. "
+        "Piano theme cue on transitions only, no underscore during dialogue."
+    ),
+    "it's always sunny": (
+        "AUDIO SIGNATURE (It's Always Sunny in Philadelphia): single-camera — "
+        "NO laugh track. Classical music cues (Temptation Rag piano, Bolero, "
+        "etc.) on act-break transitions and scene changes. Otherwise dry "
+        "diegetic sound: Paddy's Pub ambience, Philadelphia street noise."
+    ),
+    "curb your enthusiasm": (
+        "AUDIO SIGNATURE (Curb Your Enthusiasm): single-camera — NO laugh "
+        "track. The tuba-and-mandolin 'Frolic' cue on transitions and awkward "
+        "beats. Otherwise natural room tone. Dry, awkward silences are load-bearing "
+        "— don't fill them with music."
+    ),
+    "arrested development": (
+        "AUDIO SIGNATURE (Arrested Development): single-camera with narrator — "
+        "NO laugh track. Ukulele-and-banjo theme cue on transitions and "
+        "narrator asides. Ron Howard-style dry voiceover narration between "
+        "scenes. Otherwise diegetic sound only."
+    ),
+}
+
+# Extra aliases mapping character names to franchises so we catch prompts
+# that mention characters without naming the show.
+_FRANCHISE_ALIASES: dict[str, str] = {
+    "cartman": "south park", "kyle broflovski": "south park", "kenny mccormick": "south park",
+    "peter griffin": "family guy", "stewie": "family guy", "quagmire": "family guy",
+    "homer simpson": "the simpsons", "bart simpson": "the simpsons", "marge simpson": "the simpsons",
+    "rick sanchez": "rick and morty",
+    "michael scott": "the office", "dwight schrute": "the office", "jim halpert": "the office",
+    "jerry seinfeld": "seinfeld", "george costanza": "seinfeld", "kramer": "seinfeld", "elaine benes": "seinfeld",
+    "leslie knope": "parks and recreation", "ron swanson": "parks and recreation",
+    "sheldon cooper": "the big bang theory", "leonard hofstadter": "the big bang theory",
+    "ross geller": "friends", "chandler bing": "friends", "joey tribbiani": "friends",
+    "norm peterson": "cheers", "sam malone": "cheers",
+    "dennis reynolds": "it's always sunny", "charlie kelly": "it's always sunny", "frank reynolds": "it's always sunny",
+    "larry david": "curb your enthusiasm",
+    "michael bluth": "arrested development", "gob bluth": "arrested development",
+}
+
+
+def _franchise_audio_signature(prompt: str) -> str | None:
+    """Return the audio+editorial signature for a franchise, or None.
+
+    Prefers direct show mentions, falls back to character-name aliases. This
+    is the source of truth for 'does this show have a laugh track', 'what's
+    the music cue', 'multi-cam or single-cam editorial rhythm'.
+    """
+    p = prompt.lower()
+    for key in _FRANCHISE_AUDIO_SIGNATURES:
+        if key in p:
+            return _FRANCHISE_AUDIO_SIGNATURES[key]
+    for alias, franchise in _FRANCHISE_ALIASES.items():
+        if alias in p:
+            return _FRANCHISE_AUDIO_SIGNATURES.get(franchise)
+    return None
+
+
+# Generic transition guidance appended to the system prompt so the LLM writes
+# real editorial language into scene prompts — not just "cut to" but the
+# right KIND of cut for the format. When we have an outline (long form),
+# expand_prompt also injects thread-change guidance so A↔B story cuts get
+# proper transitional beats instead of smash-cuts.
+_TRANSITION_GUIDANCE = (
+    "TRANSITIONS: End each scene on a beat that primes the next cut. "
+    "For multi-camera sitcoms use hard cuts on punchlines with a scene-transition "
+    "music sting between scenes. For single-camera mockumentary use natural "
+    "handheld cuts, occasional talking-head interjections between scenes. "
+    "For animated prime-time use hard cuts with a brief musical stab on scene "
+    "changes. For act breaks (scenes marked TAG or the last scene of an A/B "
+    "story arc), end on a held reaction beat with the music cue swelling."
+)
 
 
 def _known_character_hint(prompt: str) -> str | None:
@@ -238,6 +431,7 @@ def expand_prompt(
     provider_name, url, model, headers = selected
 
     hint = _known_character_hint(prompt)
+    audio_sig = _franchise_audio_signature(prompt)
     user_msg = (
         f"User episode idea:\n{prompt.strip()}\n\n"
         f"Number of scenes to produce: {n}\n"
@@ -245,6 +439,12 @@ def expand_prompt(
     )
     if hint:
         user_msg += f"\nCanonical reference for this franchise:\n{hint}\n"
+    if audio_sig:
+        user_msg += (
+            f"\nFranchise audio signature (embed this verbatim, or an obvious "
+            f"paraphrase, in EVERY scene prompt — the video model has no memory "
+            f"of what this show sounds like):\n{audio_sig}\n"
+        )
 
     # If we have a pre-approved outline, hand it to the LLM as the story
     # blueprint. We ask it to distribute the N scenes across the cold open,
@@ -265,6 +465,16 @@ def expand_prompt(
             "- Each scene prompt should reference which story thread it "
             "belongs to at the start of the prompt (e.g. 'A-STORY BEAT 2:' "
             "or 'B-STORY BEAT 1:' or 'COLD OPEN:' or 'TAG:').\n"
+            "\nTransition and pacing rules for the outline:\n"
+            "- Cold open ends with the theme/music sting swelling and a \"hard cut to titles\" beat.\n"
+            "- The first scene AFTER a thread change (A->B or B->A) must include "
+            "'hard cut to [new location]' in its opening beat so the editorial "
+            "transition is legible; the scene BEFORE the thread change must end "
+            "on a punchline/reaction hold, not mid-motion.\n"
+            "- Roughly 1/3 and 2/3 through the scene list, mark that scene as an "
+            "act break: end on a held reaction beat with the music cue swelling, "
+            "then a fade-out.\n"
+            "- Tag ends with the closing theme sting under a held final reaction.\n"
         )
 
     user_msg += (
@@ -397,10 +607,15 @@ def _fallback(prompt: str, scene_durations: list[int], t0: float, error: str) ->
 
     We still return the same shape so multi_scene_worker doesn't need branches —
     it just consumes `scenes` regardless of provider.
+
+    Even in the fallback path we inject the franchise audio signature and a
+    lightweight editorial cue for the first and last scene, so a fallback
+    render doesn't lose the laugh-track/music behavior when the LLM is down.
     """
     n = len(scene_durations)
     hint = _known_character_hint(prompt) or ""
     audio_hint = _speech_hint(prompt)
+    audio_sig = _franchise_audio_signature(prompt) or ""
     scenes = []
     for i in range(n):
         s = (
@@ -409,6 +624,14 @@ def _fallback(prompt: str, scene_durations: list[int], t0: float, error: str) ->
         )
         if audio_hint:
             s += audio_hint
+        if audio_sig:
+            s += audio_sig + " "
+        # Cold-open/tag editorial cues so the first and last scenes have the
+        # theme sting even without the LLM's help.
+        if i == 0 and audio_sig:
+            s += "Open with the show's theme/music sting briefly under the opening beat. "
+        if i == n - 1 and audio_sig:
+            s += "End on a held reaction beat with the show's closing music cue swelling. "
         if hint:
             s += f"Style/character reference: {hint} "
         s += prompt.strip()
