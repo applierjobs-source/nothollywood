@@ -613,36 +613,79 @@ def expand_prompt(
         # opener brief to the LLM and require it to use it verbatim for scene 1,
         # then distribute the outline beats across scenes 2..N.
         opener_brief = _franchise_opener(prompt)
-        user_msg += (
-            "\nPre-approved story outline (follow this exactly, cutting "
-            "between A-story and B-story scenes as a sitcom would):\n"
-            + json.dumps(outline, indent=2)
-            + "\n\nRESERVED SCENE 1 — OPENING TITLE SEQUENCE (use verbatim as "
-            "scene 1's prompt, this is non-negotiable):\n"
-            + opener_brief
-            + "\n\nDistribute the remaining scenes (2 through N) as follows:\n"
-            "- Scene 2: cold open\n"
-            "- ~55% of remaining scenes to A-story beats (in order)\n"
-            "- ~35% of remaining scenes to B-story beats (in order)\n"
-            "- Interleave A and B scenes as cuts (A, A, B, A, B, B, A, ...) "
-            "so both stories progress in parallel. Don't render all A then all B.\n"
-            "- Last scene: tag\n"
-            "- Each scene prompt (except scene 1) should reference which story "
-            "thread it belongs to at the start of the prompt (e.g. 'A-STORY BEAT 2:' "
-            "or 'B-STORY BEAT 1:' or 'COLD OPEN:' or 'TAG:').\n"
-            "\nTransition and pacing rules for the outline:\n"
-            "- Scene 1 (title sequence) ends on the logo card hold with the theme resolving.\n"
-            "- Scene 2 (cold open) opens by cutting from the logo card into the scene, "
-            "and ends with the theme/music sting swelling before act one begins.\n"
-            "- The first scene AFTER a thread change (A->B or B->A) must include "
-            "'hard cut to [new location]' in its opening beat so the editorial "
-            "transition is legible; the scene BEFORE the thread change must end "
-            "on a punchline/reaction hold, not mid-motion.\n"
-            "- Roughly 1/3 and 2/3 through the scene list, mark that scene as an "
-            "act break: end on a held reaction beat with the music cue swelling, "
-            "then a fade-out.\n"
-            "- Tag ends with the closing theme sting under a held final reaction.\n"
-        )
+        # Detect thread mode: dual = outline has b_story, single = it doesn't.
+        # Single-thread outlines produce a cleaner story on 1-5 min renders
+        # because we have ~10-50 scenes total, not enough to develop two threads
+        # without both feeling half-baked. Supporting characters become A-story
+        # texture rather than their own parallel plot.
+        has_b_story = isinstance(outline.get("b_story"), dict) and outline["b_story"].get("beats")
+
+        if has_b_story:
+            # Dual-thread (>=5min): interleave A/B as a real 22-min sitcom.
+            user_msg += (
+                "\nPre-approved story outline (follow this exactly, cutting "
+                "between A-story and B-story scenes as a sitcom would):\n"
+                + json.dumps(outline, indent=2)
+                + "\n\nRESERVED SCENE 1 — OPENING TITLE SEQUENCE (use verbatim as "
+                "scene 1's prompt, this is non-negotiable):\n"
+                + opener_brief
+                + "\n\nDistribute the remaining scenes (2 through N) as follows:\n"
+                "- Scene 2: cold open\n"
+                "- ~55% of remaining scenes to A-story beats (in order)\n"
+                "- ~35% of remaining scenes to B-story beats (in order)\n"
+                "- Interleave A and B scenes as cuts (A, A, B, A, B, B, A, ...) "
+                "so both stories progress in parallel. Don't render all A then all B.\n"
+                "- Last scene: tag\n"
+                "- Each scene prompt (except scene 1) should reference which story "
+                "thread it belongs to at the start of the prompt (e.g. 'A-STORY BEAT 2:' "
+                "or 'B-STORY BEAT 1:' or 'COLD OPEN:' or 'TAG:').\n"
+                "\nTransition and pacing rules for the outline:\n"
+                "- Scene 1 (title sequence) ends on the logo card hold with the theme resolving.\n"
+                "- Scene 2 (cold open) opens by cutting from the logo card into the scene, "
+                "and ends with the theme/music sting swelling before act one begins.\n"
+                "- The first scene AFTER a thread change (A->B or B->A) must include "
+                "'hard cut to [new location]' in its opening beat so the editorial "
+                "transition is legible; the scene BEFORE the thread change must end "
+                "on a punchline/reaction hold, not mid-motion.\n"
+                "- Roughly 1/3 and 2/3 through the scene list, mark that scene as an "
+                "act break: end on a held reaction beat with the music cue swelling, "
+                "then a fade-out.\n"
+                "- Tag ends with the closing theme sting under a held final reaction.\n"
+            )
+        else:
+            # Single-thread (<5min): one story, escalating beats. No B-story.
+            # This produces a tighter episode for short-form because every scene
+            # develops the one plot instead of jump-cutting between two.
+            user_msg += (
+                "\nPre-approved SINGLE-THREAD story outline (follow this exactly "
+                "as one continuous story — no B-story, no parallel plot, all "
+                "scenes serve the A-story escalation):\n"
+                + json.dumps(outline, indent=2)
+                + "\n\nRESERVED SCENE 1 — OPENING TITLE SEQUENCE (use verbatim as "
+                "scene 1's prompt, this is non-negotiable):\n"
+                + opener_brief
+                + "\n\nDistribute the remaining scenes (2 through N) as follows:\n"
+                "- Scene 2: cold open\n"
+                "- Scenes 3 through N-1: A-story beats IN ORDER, dividing scenes "
+                "proportionally so each beat gets its due weight. Later beats "
+                "(escalation, turn, climax) can get more scenes than the setup.\n"
+                "- Last scene: tag\n"
+                "- Each scene prompt (except scene 1) should label its role at "
+                "the start (e.g. 'COLD OPEN:', 'BEAT 2 (rising action):', "
+                "'BEAT 4 (climax):', 'TAG:').\n"
+                "- Supporting characters (Kramer / Dwight / Stewie / etc.) can "
+                "appear in individual beats as texture — reactions, sabotage, "
+                "commentary — but do NOT peel them off into their own plot.\n"
+                "\nTransition and pacing rules for the outline:\n"
+                "- Scene 1 (title sequence) ends on the logo card hold with the theme resolving.\n"
+                "- Scene 2 (cold open) opens by cutting from the logo card into the scene, "
+                "and ends with the theme/music sting swelling before act one begins.\n"
+                "- Every scene ends on a beat that motivates the next: a reaction, "
+                "a discovery, a decision, a stakes bump. No mid-motion cuts.\n"
+                "- The scene marking the story's climax should end on a held "
+                "reaction beat with the music cue swelling.\n"
+                "- Tag ends with the closing theme sting under a held final reaction.\n"
+            )
 
     user_msg += (
         "\nReturn a JSON object with keys: style, characters, scenes "
@@ -857,6 +900,76 @@ def _fallback(prompt: str, scene_durations: list[int], t0: float, error: str) ->
 
 OUTLINE_TIMEOUT = 20.0
 
+# The B-story dividing line. Under this many seconds we produce a
+# single-thread outline (setup / rising action / turn / climax / resolution);
+# at or above this we produce a full A-story + B-story sitcom outline.
+#
+# Why 300s: real sitcom B-stories only start earning their runtime around the
+# 22-minute mark. Below ~5 minutes we don't have enough scenes to develop two
+# threads without both feeling half-baked, and the extra location cuts hurt
+# character consistency in H3. Subplots emerge naturally as A-story TEXTURE
+# (other characters reacting, sabotaging, commenting) without needing their
+# own thread.
+DUAL_THREAD_THRESHOLD_S = 300
+
+
+OUTLINE_SYSTEM_PROMPT_SINGLE = """You are a TV writer's-room outliner for SHORT-FORM video.
+
+Given a user's episode idea, produce a tight single-thread story outline
+suitable for a 1-5 minute video. Real short-form (Robot Chicken, SNL sketches,
+Rick and Morty cold opens, animated shorts) is single-thread — one story with
+clear beats, no B-story. Supporting characters add texture within the A-story,
+not a parallel plot.
+
+Return a JSON object with this exact shape:
+{
+  "logline": "one-sentence pitch of the episode",
+  "cold_open": {
+    "beat": "one-sentence description of the cold open (before titles)",
+    "characters": ["Char1", "Char2"]
+  },
+  "a_story": {
+    "title": "3-5 word episode title",
+    "premise": "one-sentence premise",
+    "beats": [
+      "Beat 1: setup / inciting incident",
+      "Beat 2: rising action / first complication",
+      "Beat 3: escalation / higher stakes",
+      "Beat 4: turn / reversal",
+      "Beat 5: climax / resolution"
+    ],
+    "characters": ["Char1", "Char2", "Char3"]
+  },
+  "tag": {
+    "beat": "one-sentence post-credits button (callback to cold open or a supporting character reacting)",
+    "characters": ["Char1"]
+  },
+  "notes": "any writer-room notes: real-figure substitutions, scope trimmed for length, etc."
+}
+
+Rules:
+- SINGLE THREAD ONLY. No B-story. Do not invent a parallel plot with different
+  characters. Supporting characters (Kramer, Dwight, Stewie, etc.) can play a
+  significant role in one or two beats of the A-story, but they should be
+  weaving into the A-story, not running their own separate plot.
+- Escalation is the load-bearing structure. Each beat should raise the stakes,
+  reverse expectations, or deepen the character's problem.
+- If the user's prompt is a franchise show (Seinfeld, The Office, Family
+  Guy, South Park, etc.), cast the outline from that show's canonical
+  characters. Use the group whose absence would make the episode NOT feel
+  like an episode of that show.
+- Do not invent characters that don't exist in the source show. For
+  original prompts, invent whatever characters serve the story and
+  describe them in the character list.
+- If the user names a real public figure, replace with a fictional analog
+  in the outline and mention this in `notes`.
+- Cold open should be a small self-contained moment that hints at the
+  episode's theme without giving away the A-story.
+- Tag should be a short post-credits button.
+
+Output ONLY the JSON object, no prose."""
+
+
 OUTLINE_SYSTEM_PROMPT = """You are a TV sitcom writer's-room outliner.
 
 Given a user's episode idea, produce a structured story outline in the shape
@@ -929,17 +1042,22 @@ Rules:
 Output ONLY the JSON object, no prose."""
 
 
-def plan_outline(prompt: str) -> dict[str, Any]:
+def plan_outline(prompt: str, duration_s: int = 0) -> dict[str, Any]:
     """Pass 1 of the two-pass long-form workflow: return a structured story
     outline for the user to approve/edit before we generate scene prompts.
 
     Args:
         prompt: The user's raw episode idea.
+        duration_s: Total render duration in seconds. Under DUAL_THREAD_THRESHOLD_S
+            (5 min) we ask for a single-thread outline (no B-story); at or above
+            it we ask for the full A-story + B-story sitcom outline. Defaults to 0
+            which triggers single-thread (safest for unknown durations).
 
     Returns:
         {
             "ok": bool,
             "outline": dict | None,     # the parsed outline JSON
+            "mode": "single" | "dual",  # which shape the outline is in
             "provider": str,            # "grok" | "anthropic" | "fallback"
             "latency_ms": int,
             "error": str | None,
@@ -949,15 +1067,26 @@ def plan_outline(prompt: str) -> dict[str, Any]:
     outline shape so the frontend still has something to render.
     """
     t0 = time.time()
+    dual_thread = duration_s >= DUAL_THREAD_THRESHOLD_S
+    outline_mode = "dual" if dual_thread else "single"
+    system_prompt = OUTLINE_SYSTEM_PROMPT if dual_thread else OUTLINE_SYSTEM_PROMPT_SINGLE
+
+    def _tag_mode(fb: dict) -> dict:
+        fb["mode"] = outline_mode
+        if outline_mode == "single" and isinstance(fb.get("outline"), dict):
+            fb["outline"].pop("b_story", None)
+        return fb
+
     selected = _select_provider()
     if selected is None:
-        return _outline_fallback(prompt, t0, "no LLM key set (XAI_API_KEY or ANTHROPIC_API_KEY)")
+        return _tag_mode(_outline_fallback(prompt, t0, "no LLM key set (XAI_API_KEY or ANTHROPIC_API_KEY)"))
     provider_name, url, model, headers = selected
 
     hint = _known_character_hint(prompt)
     user_msg = f"User episode idea:\n{prompt.strip()}\n"
     if hint:
         user_msg += f"\nCanonical reference for this franchise:\n{hint}\n"
+    user_msg += f"\nTarget total duration: {duration_s}s ({outline_mode}-thread outline)."
     user_msg += "\nReturn the JSON outline."
 
     try:
@@ -967,16 +1096,16 @@ def plan_outline(prompt: str) -> dict[str, Any]:
             json={
                 "model": model,
                 "max_tokens": 2000,
-                "system": OUTLINE_SYSTEM_PROMPT,
+                "system": system_prompt,
                 "messages": [{"role": "user", "content": user_msg}],
             },
             timeout=OUTLINE_TIMEOUT,
         )
     except requests.RequestException as e:
-        return _outline_fallback(prompt, t0, f"http error ({provider_name}): {e}")
+        return _tag_mode(_outline_fallback(prompt, t0, f"http error ({provider_name}): {e}"))
 
     if r.status_code != 200:
-        return _outline_fallback(prompt, t0, f"{provider_name} {r.status_code}: {r.text[:200]}")
+        return _tag_mode(_outline_fallback(prompt, t0, f"{provider_name} {r.status_code}: {r.text[:200]}"))
 
     try:
         data = r.json()
@@ -987,30 +1116,38 @@ def plan_outline(prompt: str) -> dict[str, Any]:
         ]
         raw = "".join(text_blocks).strip()
     except Exception as e:
-        return _outline_fallback(prompt, t0, f"parse error ({provider_name}): {e}")
+        return _tag_mode(_outline_fallback(prompt, t0, f"parse error ({provider_name}): {e}"))
 
     m = re.search(r"\{.*\}", raw, re.DOTALL)
     if not m:
-        return _outline_fallback(prompt, t0, f"no JSON in response: {raw[:200]}")
+        return _tag_mode(_outline_fallback(prompt, t0, f"no JSON in response: {raw[:200]}"))
     try:
         parsed = json.loads(m.group(0))
     except json.JSONDecodeError as e:
-        return _outline_fallback(prompt, t0, f"invalid JSON: {e}")
+        return _tag_mode(_outline_fallback(prompt, t0, f"invalid JSON: {e}"))
 
     # Light schema normalization — never crash, just fill missing sections.
-    outline = _normalize_outline(parsed)
+    # For single-thread we DROP the b_story entirely so the outline card and
+    # downstream expander don't try to render it.
+    outline = _normalize_outline(parsed, mode=outline_mode)
 
     return {
         "ok": True,
         "outline": outline,
+        "mode": outline_mode,
         "provider": provider_name,
         "latency_ms": int((time.time() - t0) * 1000),
         "error": None,
     }
 
 
-def _normalize_outline(obj: dict) -> dict:
-    """Ensure the outline has all required keys with reasonable defaults."""
+def _normalize_outline(obj: dict, mode: str = "dual") -> dict:
+    """Ensure the outline has all required keys with reasonable defaults.
+
+    For mode='single' we OMIT the b_story field entirely so the frontend
+    knows to render a single-thread card and the expander won't try to
+    interleave a nonexistent B-thread.
+    """
     def _str(x, default=""):
         return str(x).strip() if x else default
     def _list(x):
@@ -1032,14 +1169,16 @@ def _normalize_outline(obj: dict) -> dict:
             "characters": _list(x.get("characters")),
         }
 
-    return {
+    result = {
         "logline": _str(obj.get("logline")),
         "cold_open": _short(obj.get("cold_open")),
         "a_story": _story(obj.get("a_story"), 5),
-        "b_story": _story(obj.get("b_story"), 4),
         "tag": _short(obj.get("tag")),
         "notes": _str(obj.get("notes")),
     }
+    if mode == "dual":
+        result["b_story"] = _story(obj.get("b_story"), 4)
+    return result
 
 
 def _outline_fallback(prompt: str, t0: float, error: str) -> dict[str, Any]:

@@ -687,8 +687,12 @@ function renderOutline(plan) {
   el.previewScenes.innerHTML = "";
   const outline = plan.outline;
   const totalScenes = (plan.scenes_plan || []).length;
+  // Thread mode comes from the backend. Fall back to detecting b_story so old
+  // API responses still work. Single-thread = no B-story card, cleaner label.
+  const threadMode = plan.outline_thread_mode || (outline.b_story ? "dual" : "single");
+  const isSingle = threadMode === "single";
   const wrap = document.createElement("div");
-  wrap.className = "outline-card";
+  wrap.className = "outline-card" + (isSingle ? " outline-single" : " outline-dual");
 
   const errBanner = plan.outline_ok
     ? ""
@@ -699,9 +703,20 @@ function renderOutline(plan) {
       .map((b, i) => `<div class="outline-beat"><span class="outline-beat-label">${prefix} · Beat ${i + 1}</span><textarea data-key="${prefix.toLowerCase().replace(/[^a-z]/g, "")}-beat" data-idx="${i}">${escapeHtml(b)}</textarea></div>`)
       .join("");
 
+  // For single-thread mode, don't call the A-story an "A-Story" — it's just
+  // "the story" — and skip the B-story block entirely.
+  const storyLabel = isSingle ? "Story" : "A-Story";
+  const bStoryBlock = isSingle ? "" : `
+    <div class="outline-section outline-b">
+      <label class="outline-label">B-Story — <input class="outline-inline" data-key="b_story-title" value="${escapeHtml(outline.b_story?.title || "")}" /></label>
+      <textarea data-key="b_story-premise" placeholder="Premise">${escapeHtml(outline.b_story?.premise || "")}</textarea>
+      ${beatList(outline.b_story?.beats, "B-STORY")}
+      <div class="outline-cast-line">Cast: ${escapeHtml((outline.b_story?.characters || []).join(", ") || "—")}</div>
+    </div>`;
+
   wrap.innerHTML = `
     <div class="outline-hero">
-      <div class="outline-hero-eyebrow">Story Outline</div>
+      <div class="outline-hero-eyebrow">Story Outline${isSingle ? "" : " · A / B"}</div>
       <div class="outline-hero-title">Approve the story before we render ${totalScenes} scenes</div>
       <div class="outline-hero-sub">Edit any section. We’ll write the scene prompts from this after you approve.</div>
     </div>
@@ -716,17 +731,12 @@ function renderOutline(plan) {
       <div class="outline-cast-line">Cast: ${escapeHtml((outline.cold_open?.characters || []).join(", ") || "—")}</div>
     </div>
     <div class="outline-section outline-a">
-      <label class="outline-label">A-Story — <input class="outline-inline" data-key="a_story-title" value="${escapeHtml(outline.a_story?.title || "")}" /></label>
+      <label class="outline-label">${storyLabel} — <input class="outline-inline" data-key="a_story-title" value="${escapeHtml(outline.a_story?.title || "")}" /></label>
       <textarea data-key="a_story-premise" placeholder="Premise">${escapeHtml(outline.a_story?.premise || "")}</textarea>
       ${beatList(outline.a_story?.beats, "A-STORY")}
       <div class="outline-cast-line">Cast: ${escapeHtml((outline.a_story?.characters || []).join(", ") || "—")}</div>
     </div>
-    <div class="outline-section outline-b">
-      <label class="outline-label">B-Story — <input class="outline-inline" data-key="b_story-title" value="${escapeHtml(outline.b_story?.title || "")}" /></label>
-      <textarea data-key="b_story-premise" placeholder="Premise">${escapeHtml(outline.b_story?.premise || "")}</textarea>
-      ${beatList(outline.b_story?.beats, "B-STORY")}
-      <div class="outline-cast-line">Cast: ${escapeHtml((outline.b_story?.characters || []).join(", ") || "—")}</div>
-    </div>
+    ${bStoryBlock}
     <div class="outline-section">
       <label class="outline-label">Tag</label>
       <textarea data-key="tag-beat">${escapeHtml(outline.tag?.beat || "")}</textarea>
@@ -742,6 +752,7 @@ function renderOutline(plan) {
 function collectOutlineFromDom() {
   const card = el.previewScenes.querySelector(".outline-card");
   if (!card) return null;
+  const isSingle = card.classList.contains("outline-single");
   const get = (sel) => (card.querySelector(sel)?.value || "").trim();
   const getList = (prefix) =>
     Array.from(card.querySelectorAll(`textarea[data-key="${prefix}-beat"]`))
@@ -749,7 +760,7 @@ function collectOutlineFromDom() {
       .map((t) => t.value.trim())
       .filter(Boolean);
   const orig = pendingPlan?.outline || {};
-  return {
+  const result = {
     logline: get('textarea[data-key="logline"]'),
     cold_open: {
       beat: get('textarea[data-key="cold_open-beat"]'),
@@ -761,18 +772,23 @@ function collectOutlineFromDom() {
       beats: getList("astory"),
       characters: orig.a_story?.characters || [],
     },
-    b_story: {
-      title: get('input[data-key="b_story-title"]'),
-      premise: get('textarea[data-key="b_story-premise"]'),
-      beats: getList("bstory"),
-      characters: orig.b_story?.characters || [],
-    },
     tag: {
       beat: get('textarea[data-key="tag-beat"]'),
       characters: orig.tag?.characters || [],
     },
     notes: orig.notes || "",
   };
+  // Only include b_story in dual-thread mode. In single-thread mode we omit
+  // it entirely so the backend expander takes the single-thread path.
+  if (!isSingle) {
+    result.b_story = {
+      title: get('input[data-key="b_story-title"]'),
+      premise: get('textarea[data-key="b_story-premise"]'),
+      beats: getList("bstory"),
+      characters: orig.b_story?.characters || [],
+    };
+  }
+  return result;
 }
 
 // Rotate through DDG query variants each time user clicks 'More options'.

@@ -2142,7 +2142,7 @@ async def plan(
     # slow down the fun — skip straight to scene expansion as before.
     use_outline = duration >= 60
     if use_outline:
-        outline_result = plan_outline(prompt)
+        outline_result = plan_outline(prompt, duration_s=duration)
         return {
             "title": title,
             "slug": slug,
@@ -2151,6 +2151,7 @@ async def plan(
             "outline_ok": outline_result.get("ok", False),
             "outline_provider": outline_result.get("provider"),
             "outline_error": outline_result.get("error"),
+            "outline_thread_mode": outline_result.get("mode", "single"),
             "candidates": candidates,
             "mode": "outline",  # frontend renders the approval card
         }
