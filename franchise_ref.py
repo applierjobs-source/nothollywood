@@ -987,3 +987,302 @@ def resolve_franchise_ref(
         "title": title,
         "source": source,
     }
+
+# ---------------------------------------------------------------------------
+# Per-character reference stills
+# ---------------------------------------------------------------------------
+#
+# Problem: our group cast still (seinfeld.png) contains Jerry/George/Elaine/
+# Kramer. If the user prompt says "Newman commits voter fraud", nano-banana
+# has no Newman in its reference so it grabs the closest match (bald-ish,
+# chubby → George) and puts him in a USPS uniform. Wrong character entirely.
+#
+# Fix: ask Grok which characters appear in the scene, then produce a
+# per-character reference still for each one (cached to disk under
+# FRANCHISE_REFS/<show-slug>__<char-slug>.png). Pass those stills — not the
+# group frame — to nano-banana for scene 0 keyframe generation. Nano-banana
+# supports up to 3 image_urls so we cap at 3 per scene.
+#
+# Cache is content-addressable by (title, character): once we generate
+# "Seinfeld → Newman" the first time, every future render reuses that image.
+# Anti-hallucination: Grok Imagine can produce a specific character when
+# named ("Newman from Seinfeld, plump USPS mail carrier, dark hair, mustache,
+# played by Wayne Knight") — the actor's likeness plus role is a stable prompt.
+
+_CHARACTER_TIMEOUT = 30
+_MAX_CHARACTERS_PER_SCENE = 3  # nano-banana cap
+
+
+@lru_cache(maxsize=2048)
+def _llm_extract_scene_characters(show_title: str, scene_prompt: str) -> tuple[str, ...]:
+    """Ask Grok which characters from <show_title> should appear in this scene.
+
+    Two modes, transparent to the caller:
+
+    1. Characters explicitly named in the scene ("Newman commits voter fraud")
+       -> return exactly those characters, in order of prominence.
+    2. Generic scene with no character names ("George's apartment, a robbery")
+       -> Grok picks the show characters that canonically fit this location /
+       situation. For a Seinfeld apartment scene that's Jerry + whoever the
+       scene's action implies. For a generic Seinfeld coffee-shop scene,
+       Grok might return [Jerry Seinfeld, George Costanza, Elaine Benes].
+
+    Returns a tuple of canonical character names ordered main -> background,
+    capped at 3 (nano-banana image_urls limit). Empty tuple only when Grok
+    is unavailable or the show is unknown to the LLM.
+
+    Grok is instructed to always cast someone from the show — the whole point
+    of a Seinfeld render is that Seinfeld characters appear in it. We never
+    invent characters, and we prefer named characters over 'a background
+    extra' because nano-banana needs identifiable reference stills.
+    """
+    if not XAI_API_KEY or not show_title:
+        return ()
+    system = (
+        f"You cast a scene for a video render of the show '{show_title}'. "
+        f"Return which canonical characters from this show should appear "
+        f"in the scene, in order of prominence, max 3.\n\n"
+        "Two cases:\n"
+        "1. If the scene explicitly names characters (e.g. 'Newman delivers "
+        "mail'), return exactly those named characters.\n"
+        "2. If the scene is generic (no character names, just location or "
+        "action), pick the show's main characters that best fit this scene. "
+        "For a Seinfeld apartment scene default to Jerry Seinfeld. For a "
+        "generic Monk's Diner scene, cast the group that would naturally be "
+        "there (Jerry + George, or Jerry + Elaine, etc). For a generic "
+        "Office scene at Dunder Mifflin, cast Michael Scott and whoever "
+        "the action implies.\n\n"
+        "Output: JSON array of canonical character names, max 3. Just the "
+        "array, no other text.\n\n"
+        "Examples:\n"
+        '  Seinfeld / "Newman commits voter fraud in his apartment" -> '
+        '["Newman"]\n'
+        '  Seinfeld / "Jerry and Newman argue about mail" -> '
+        '["Jerry Seinfeld", "Newman"]\n'
+        '  Seinfeld / "George and Elaine at the coffee shop" -> '
+        '["George Costanza", "Elaine Benes"]\n'
+        '  Seinfeld / "a coffee shop scene, morning" (generic) -> '
+        '["Jerry Seinfeld", "George Costanza"]\n'
+        '  Seinfeld / "Jerrys apartment, night" (generic) -> '
+        '["Jerry Seinfeld", "Kramer"]\n'
+        '  The Office / "Michael gives a TED talk" -> ["Michael Scott"]\n'
+        '  The Office / "a meeting in the conference room" (generic) -> '
+        '["Michael Scott", "Dwight Schrute", "Jim Halpert"]\n'
+        '  Family Guy / "the living room, chaos" (generic) -> '
+        '["Peter Griffin", "Lois Griffin", "Stewie Griffin"]\n\n'
+        "Rules:\n"
+        "- ALWAYS return at least one character from the show if the show "
+        "is known to you. Never return [] just because names weren't "
+        "explicitly stated — pick who fits.\n"
+        "- Use full canonical names (Newman, George Costanza, Michael Scott, "
+        "Peter Griffin).\n"
+        "- Max 3. Order by prominence in this specific scene.\n"
+        "- Never invent characters that don't exist in the show.\n"
+        "- Only return [] if you don't recognize the show at all."
+    )
+    body = {
+        "model": XAI_MODEL,
+        "max_tokens": 80,
+        "system": system,
+        "messages": [{"role": "user", "content": scene_prompt[:1500]}],
+    }
+    try:
+        r = requests.post(
+            "https://api.x.ai/v1/messages",
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": XAI_API_KEY,
+                "anthropic-version": "2023-06-01",
+            },
+            data=json.dumps(body),
+            timeout=_CHARACTER_TIMEOUT,
+        )
+        if r.status_code != 200:
+            print(f"[franchise_ref] characters http {r.status_code}: {r.text[:200]}")
+            return ()
+        data = r.json()
+        text = ""
+        for block in data.get("content", []):
+            if block.get("type") == "text":
+                text = (block.get("text") or "").strip()
+                break
+        text = text.strip("`").strip()
+        if text.startswith("json"):
+            text = text[4:].strip()
+        try:
+            arr = json.loads(text)
+        except json.JSONDecodeError:
+            print(f"[franchise_ref] characters non-JSON: {text[:200]}")
+            return ()
+        if not isinstance(arr, list):
+            return ()
+        clean: list[str] = []
+        for item in arr:
+            if isinstance(item, str):
+                name = item.strip().strip('"\'')
+                if 2 <= len(name) <= 60 and "\n" not in name:
+                    clean.append(name)
+        return tuple(clean[:_MAX_CHARACTERS_PER_SCENE])
+    except Exception as e:  # pragma: no cover
+        print(f"[franchise_ref] characters exception: {e}")
+        return ()
+
+
+def _character_slug(character: str) -> str:
+    """Deterministic filesystem-safe slug for a character name."""
+    s = re.sub(r"[^a-z0-9]+", "-", character.lower()).strip("-")
+    return s[:40] or "unknown"
+
+
+@lru_cache(maxsize=512)
+def _llm_describe_character(show_title: str, character: str) -> Optional[str]:
+    """Ask Grok for a visual description of a specific character.
+
+    We pass this description to Grok Imagine to generate a per-character
+    reference still. Result cached by (title, character).
+
+    Naming the actor is intentional — Grok Imagine can produce a likeness of
+    a well-known TV actor as long as we frame it as their character role.
+    That gives us far more reliable identity anchoring than a generic
+    physical description.
+    """
+    if not XAI_API_KEY:
+        return None
+    system = (
+        f"You describe a single named character from the TV show or movie "
+        f"'{show_title}' for a text-to-image model. Write ONE paragraph, "
+        f"40-70 words, focused on physical appearance: age range, build, "
+        f"hair, facial features, typical wardrobe, and — if the actor is "
+        f"well-known — mention the actor by name ('played by X'). "
+        f"No plot, no dialogue, no scene description. If you don't "
+        f"recognize the character, output NONE."
+    )
+    body = {
+        "model": XAI_MODEL,
+        "max_tokens": 200,
+        "system": system,
+        "messages": [{"role": "user", "content": character[:200]}],
+    }
+    try:
+        r = requests.post(
+            "https://api.x.ai/v1/messages",
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": XAI_API_KEY,
+                "anthropic-version": "2023-06-01",
+            },
+            data=json.dumps(body),
+            timeout=_CHARACTER_TIMEOUT,
+        )
+        if r.status_code != 200:
+            print(f"[franchise_ref] describe http {r.status_code}: {r.text[:200]}")
+            return None
+        data = r.json()
+        text = ""
+        for block in data.get("content", []):
+            if block.get("type") == "text":
+                text = (block.get("text") or "").strip()
+                break
+        if not text or text.upper().startswith("NONE"):
+            return None
+        return text[:800]
+    except Exception as e:  # pragma: no cover
+        print(f"[franchise_ref] describe exception: {e}")
+        return None
+
+
+def resolve_character_ref(
+    show_title: str,
+    character: str,
+    *,
+    franchise_refs_dir: Path,
+    public_origin: str,
+) -> Optional[str]:
+    """Return a public HTTPS URL to a reference still of `character` from
+    `show_title`, generating and caching it on first use.
+
+    Cache path: <franchise_refs_dir>/<show-slug>__<char-slug>.png
+    Never raises. Returns None if we can't produce a valid still.
+    """
+    if not show_title or not character or not public_origin:
+        return None
+
+    show_slug = slugify(show_title)
+    char_slug = _character_slug(character)
+    if not show_slug or not char_slug:
+        return None
+
+    # Cache hit: any extension is fine.
+    for ext in ("png", "jpg", "jpeg", "webp"):
+        cached = franchise_refs_dir / f"char__{show_slug}__{char_slug}.{ext}"
+        if cached.exists() and cached.stat().st_size > 20_000:
+            return f"{public_origin}/static/franchise-refs/{cached.name}"
+
+    # Miss: describe the character, generate via Grok Imagine, cache.
+    description = _llm_describe_character(show_title, character)
+    if not description:
+        return None
+
+    # Compose an image prompt tuned for identity-anchoring reference stills:
+    # neutral pose, plain background, no scene action — nano-banana can then
+    # place this character into any scene.
+    image_prompt = (
+        f"Full-body portrait reference still of {character} from {show_title}. "
+        f"{description} Standing in a neutral pose facing camera, plain "
+        f"neutral background, clear lighting, no props, no scene, no text. "
+        f"Photorealistic, 4K, sharp focus on the face."
+    )
+    url = _call_grok_imagine(image_prompt)
+    if not url:
+        # Retry with trigger tokens stripped (works for the same reasons as
+        # _generate_cast_still_xai's retry).
+        softer = _strip_ip_triggers(image_prompt)
+        if softer != image_prompt:
+            url = _call_grok_imagine(softer)
+    if not url:
+        return None
+
+    got = _download_and_validate(url)
+    if not got:
+        return None
+    raw, ext = got
+    out = franchise_refs_dir / f"char__{show_slug}__{char_slug}.{ext}"
+    try:
+        out.write_bytes(raw)
+    except Exception as e:  # pragma: no cover
+        print(f"[franchise_ref] cache write failed for {out}: {e}")
+        return None
+    print(f"[franchise_ref] cached character '{character}' for '{show_title}' "
+          f"-> {out.name} ({len(raw)} bytes)")
+    return f"{public_origin}/static/franchise-refs/{out.name}"
+
+
+def resolve_scene_character_refs(
+    show_title: str,
+    scene_prompt: str,
+    *,
+    franchise_refs_dir: Path,
+    public_origin: str,
+) -> list[str]:
+    """Full pipeline: extract characters from scene_prompt, resolve a ref
+    still for each, return the list of public URLs (up to 3). Order preserved
+    from Grok's prominence ranking. Skips characters we can't generate a
+    ref for. Never raises.
+    """
+    if not show_title or not scene_prompt:
+        return []
+    characters = _llm_extract_scene_characters(show_title, scene_prompt)
+    if not characters:
+        return []
+    urls: list[str] = []
+    for ch in characters:
+        u = resolve_character_ref(
+            show_title, ch,
+            franchise_refs_dir=franchise_refs_dir,
+            public_origin=public_origin,
+        )
+        if u:
+            urls.append(u)
+        if len(urls) >= _MAX_CHARACTERS_PER_SCENE:
+            break
+    return urls

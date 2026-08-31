@@ -22,6 +22,7 @@ from auth import require_user, get_user
 from prompt_expander import expand_prompt
 from franchise_ref import (
     resolve_franchise_ref,
+    resolve_scene_character_refs,
     extract_show_title,
     extract_show_info,
     slugify as _slugify_title,
@@ -1222,6 +1223,16 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
     # ~2-3min standard-H3 R2V endpoint while still anchoring identity, and
     # avoids showing the raw reference photo as the first ~0.5s of video.
     #
+    # Character-aware reference selection: when the render is franchise-based
+    # (e.g. Seinfeld), the group cast frame doesn't contain every character.
+    # If the scene mentions Newman, our seinfeld.png has Jerry/George/Elaine/
+    # Kramer only — no Newman — so nano-banana grabs the closest lookalike
+    # (George) and dresses him as a mail carrier. Fix: extract characters
+    # from the scene prompt via Grok, resolve a per-character reference still
+    # for each (Grok Imagine, cached to disk), and hand THOSE stills to
+    # nano-banana instead of the group frame. Falls back to group frame if
+    # no characters detected or generation fails.
+    #
     # Scenes 1+ chain from the previous scene's extracted last frame (I2V).
     current_ref_mode = "first_frame"  # always I2V now
     if current_ref:
@@ -1239,9 +1250,38 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
             or job_rec.get("prompt")
             or "cinematic film still"
         )
+        top_prompt = (job_rec.get("prompt") or "").strip()
+
+        # Resolve per-character references when this looks franchise-based.
+        # extract_show_title returns None for original prompts, in which case
+        # we skip the character path and just use the user's chosen ref.
+        keyframe_refs: list[str] = []
+        try:
+            show_title = extract_show_title(top_prompt) if top_prompt else None
+        except Exception as e:  # noqa: BLE001
+            print(f"[render {job_id}] show-title extraction crashed: {e}")
+            show_title = None
+        if show_title and PUBLIC_ORIGIN:
+            try:
+                char_refs = resolve_scene_character_refs(
+                    show_title, s0_prompt,
+                    franchise_refs_dir=FRANCHISE_REFS,
+                    public_origin=PUBLIC_ORIGIN,
+                )
+                if char_refs:
+                    keyframe_refs = char_refs
+                    print(f"[render {job_id}] scene 0 using {len(char_refs)} character ref(s) for '{show_title}'")
+            except Exception as e:  # noqa: BLE001
+                print(f"[render {job_id}] character-ref resolution crashed: {e}")
+
+        # Fall back to the user-picked reference (group cast frame or user
+        # upload) when we don't have character-specific refs.
+        if not keyframe_refs:
+            keyframe_refs = [current_ref]
+
         keyframe_url, kf_err = generate_scene0_keyframe(
             scene_prompt=s0_prompt,
-            reference_urls=[current_ref],
+            reference_urls=keyframe_refs,
             job_id=job_id,
         )
         if keyframe_url:
