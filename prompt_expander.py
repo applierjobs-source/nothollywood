@@ -507,12 +507,14 @@ def _franchise_audio_signature(prompt: str) -> str | None:
 
 _FRANCHISE_OPENERS: dict[str, str] = {
     "seinfeld": (
-        "OPENING TITLE SEQUENCE (Seinfeld): a single Jerry Seinfeld stand-up "
-        "comedy cutaway on a small brick-wall stand-up stage, holding a microphone, "
-        "delivering a one-line observational joke about everyday life to a laughing "
-        "audience. The signature Seinfeld slap-bass theme song plays. Cut to a bold "
-        "white 'Seinfeld' logo card on black at the end, with the slap-bass sting "
-        "resolving."
+        "OPENING (Seinfeld cold open): Jerry Seinfeld on a small brick-wall "
+        "stand-up stage in a warmly-lit 90s comedy club, gesturing with a "
+        "microphone as he delivers a one-line observational joke. The audience "
+        "laughs in the foreground. The signature Seinfeld slap-bass theme "
+        "plucks underneath. He steps forward, gestures with his free hand, and "
+        "finishes the joke. Continuous motion the whole time \u2014 he never stops "
+        "moving. NO text on screen, NO title cards, NO logo cards, NO written "
+        "words. Pure live-action performance footage."
     ),
     "family guy": (
         "OPENING TITLE SEQUENCE (Family Guy): the Griffin family (Peter in white "
@@ -592,10 +594,12 @@ _FRANCHISE_OPENERS: dict[str, str] = {
         "Always Sunny in Philadelphia' logo card in typewriter typography."
     ),
     "curb your enthusiasm": (
-        "OPENING TITLE SEQUENCE (Curb Your Enthusiasm): a simple white title "
-        "card on black with the show's name in bold serif type, while the "
-        "'Frolic' tuba-and-mandolin theme by Luciano Michelini plays. That's "
-        "the entire opener — no montage, just the music and the card."
+        "OPENING (Curb Your Enthusiasm cold open): Larry David walking down a "
+        "sunny Los Angeles street in his signature khakis and casual polo, "
+        "muttering to himself and gesturing in mild irritation, glancing at "
+        "passing pedestrians. Natural handheld camera, warm LA daylight. The "
+        "'Frolic' tuba-and-mandolin theme by Luciano Michelini plays under the "
+        "scene. Continuous walking motion throughout."
     ),
     "arrested development": (
         "OPENING TITLE SEQUENCE (Arrested Development): quick cuts of the "
@@ -607,31 +611,72 @@ _FRANCHISE_OPENERS: dict[str, str] = {
     ),
 }
 
+# Note: We deliberately AVOID asking H3 Max to render title-card text.
+# fal H3 Max cannot reliably render specific words on screen — asking for
+# "a Seinfeld logo card" produces frozen frames with misspelled text like
+# 'Seinleld' or 'Simsonps'. Instead we describe a lively, motion-filled
+# opening establishing shot with the show's theme playing under it. If
+# franchise-specific openers below still say "logo card" or "title card",
+# rewrite them to describe motion without text.
 _GENERIC_OPENER = (
-    "OPENING TITLE SEQUENCE: a bold typographic title-card animation of the "
-    "show's title on a solid color background, with a punchy 6-second theme "
-    "song appropriate to the show's tone (upbeat for sitcoms, dramatic for "
-    "prestige TV, quirky for animated). End on a clean hold of the title card "
-    "as the theme resolves."
+    "OPENING establishing shot: a signature location or character moment "
+    "that immediately signals the show's tone \u2014 lively, in motion, with "
+    "clear on-screen action from beginning to end. The show's theme music "
+    "plays under the scene. NO text on screen, NO title cards, NO logo "
+    "cards, NO written words. Continuous camera motion or subject motion "
+    "the whole time; nothing static."
 )
+
+
+# fal H3 Max cannot render specific words on screen — it produces frozen
+# frames with garbled misspellings ("Seinleld", "Simsonps"). Every legacy
+# opener above ends with "End on the 'X' logo card" which is exactly the
+# thing that breaks. Strip those sentences at emission time and append a
+# hard "no text on screen" instruction so H3 doesn't fall back to a
+# hallucinated title card. One place to change instead of touching every
+# entry.
+_LOGO_CARD_SUFFIX_RE = re.compile(
+    r"\s*(?:End on |Ends on |Cut to |End with )"
+    r"[^.]*?(?:logo card|title card|title-card)[^.]*\.\s*",
+    re.IGNORECASE,
+)
+
+_NO_TEXT_APPENDIX = (
+    " NO on-screen text, NO title cards, NO logo cards, NO written words "
+    "anywhere in the frame \u2014 every second must be lively performance "
+    "footage in continuous motion. The show's theme music plays throughout."
+)
+
+
+def _sanitize_opener(opener: str) -> str:
+    """Strip 'End on the X logo card' sentences and append a hard no-text
+    directive so H3 Max renders live motion instead of a frozen misspelled
+    title card."""
+    cleaned = _LOGO_CARD_SUFFIX_RE.sub(" ", opener).strip()
+    # Collapse any double spaces the substitution left behind
+    while "  " in cleaned:
+        cleaned = cleaned.replace("  ", " ")
+    return cleaned + _NO_TEXT_APPENDIX
 
 
 def _franchise_opener(prompt: str) -> str:
     """Return the opening title sequence brief for a franchise.
 
     Falls back to a generic title-card opener when no franchise matches, so
-    every long-form render still gets a proper theme-song intro.
+    every long-form render still gets a proper theme-song intro. All openers
+    are sanitized to remove text-on-screen requests that H3 Max would
+    render as frozen misspelled logo cards.
     """
     p = prompt.lower()
     for key in _FRANCHISE_OPENERS:
         if key in p:
-            return _FRANCHISE_OPENERS[key]
+            return _sanitize_opener(_FRANCHISE_OPENERS[key])
     for alias, franchise in _FRANCHISE_ALIASES.items():
         if alias in p:
             opener = _FRANCHISE_OPENERS.get(franchise)
             if opener:
-                return opener
-    return _GENERIC_OPENER
+                return _sanitize_opener(opener)
+    return _sanitize_opener(_GENERIC_OPENER)
 
 
 # Generic transition guidance appended to the system prompt so the LLM writes
