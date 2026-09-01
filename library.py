@@ -255,12 +255,14 @@ def save_render_to_library(
     # 1) Upload the MP4 (with retry). Two failure modes matter here:
     #   - Transient (5xx / network): retry a few times inline; if still failing,
     #     park in the persistent queue and let the reaper try later.
-    #   - Permanent (413 EntityTooLarge from Supabase's per-file cap): the
-    #     bucket physically can't hold this file. Instead of dropping the row,
-    #     record the render with a LOCAL: sentinel so /api/library serves it
-    #     from Railway's static-videos volume. The row survives redeploys of
-    #     the app code, the mp4 survives on the mounted volume, and the user
-    #     never loses the render again.
+    #   - Permanent (413 EntityTooLarge from Supabase's per-file cap): with
+    #     the current 500 MB bucket cap this should basically never fire (a
+    #     500 MB mp4 is ~30+ minutes at 768P). If it does, we fall back to
+    #     a LOCAL: sentinel so the row survives, but WARNING: Railway does
+    #     NOT have a persistent volume attached, so LOCAL-served files vanish
+    #     on the next deploy. If we start hitting this again the fix is to
+    #     raise the bucket cap further (Supabase Pro allows up to 50 GB per
+    #     file) or attach a Railway volume.
     #
     # NB: local-served rows have `storage_path='LOCAL:{job_id}.mp4'` and no
     # thumb_path. /api/library special-cases this prefix.
@@ -270,11 +272,17 @@ def save_render_to_library(
     if not ok:
         # Distinguish the size cap from other 4xx / 5xx errors. A 413 is
         # permanent for this project's plan tier — no amount of retrying
-        # will move a >50 MB file into the Free-tier bucket.
+        # will move a file over the bucket's file_size_limit into it.
         is_size_cap = ("413" in err) or ("EntityTooLarge" in err) or ("Payload too large" in err.lower() if err else False)
         if is_size_cap:
-            print(f"[library] {job_id} exceeds Supabase per-file cap; "
-                  f"falling back to LOCAL-served row so it stays in the library")
+            # This is now a WARNING-level event, not routine. With the 500 MB
+            # bucket cap it means someone rendered something absolutely huge.
+            # Log loudly so it shows up in Railway logs and we can raise the
+            # cap again if it becomes a pattern.
+            print(f"[library] WARNING: {job_id} exceeds Supabase 500MB cap "
+                  f"(bytes={bytes_}). Falling back to LOCAL-served row \u2014 "
+                  f"THIS FILE WILL BE LOST ON NEXT RAILWAY DEPLOY. "
+                  f"Raise the bucket file_size_limit or attach a Railway volume.")
             storage_path = f"LOCAL:{job_id}.mp4"
             served_locally = True
         else:
