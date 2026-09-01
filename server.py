@@ -601,12 +601,18 @@ def _fal_edit_image(
     """
     if not FAL_KEY:
         return None, "no fal.ai key configured"
+    # safety_tolerance=6 is the most permissive setting fal exposes. Without
+    # this the default (4) blocks nearly every celebrity/franchise reference
+    # — which is exactly our scene 0 use case. When the filter trips, the
+    # request returns HTTP 200 but the response body has {detail:[...]}, no
+    # {images:[...]}. We handle that below in the COMPLETED branch.
     body = {
         "prompt": prompt,
         "image_urls": image_urls[:3],
         "num_images": 1,
         "aspect_ratio": aspect_ratio,
         "output_format": "jpeg",
+        "safety_tolerance": "6",
     }
     try:
         r = requests.post(f"{FAL_BASE}/{_NANOBANANA_ENDPOINT}", headers=fal_headers(), json=body, timeout=60)
@@ -642,6 +648,16 @@ def _fal_edit_image(
                 imgs = res.get("images") or []
                 if imgs and imgs[0].get("url"):
                     return imgs[0]["url"], None
+                # fal returns 200+COMPLETED even when the safety filter blocks
+                # generation — the response body has {detail:[...]} instead of
+                # {images:[...]}. Surface the human-readable reason so callers
+                # can log/report it accurately.
+                detail = res.get("detail")
+                if isinstance(detail, list) and detail:
+                    d0 = detail[0]
+                    if isinstance(d0, dict):
+                        msg = d0.get("msg") or d0.get("type") or str(d0)
+                        return None, f"nano-banana refused: {msg}"
                 return None, f"nano-banana no image in result: {str(res)[:200]}"
             if st == "FAILED":
                 return None, "nano-banana generation failed"
@@ -1374,6 +1390,9 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
     #
     # Scenes 1+ chain from the previous scene's extracted last frame (I2V).
     current_ref_mode = "first_frame"  # always I2V now
+    # Default False — only set True below when nano-banana keyframe fails
+    # and we fall back to using the raw ref as scene 0's first frame.
+    used_raw_ref_as_opener = False
     if current_ref:
         j = JOBS.get(job_id)
         if j is not None:
@@ -1438,6 +1457,10 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
             reference_urls=keyframe_refs,
             job_id=job_id,
         )
+        # Track whether we ended up using the raw reference as the opening
+        # frame. When we did, H3 Max needs ~1s to morph the still into the
+        # actual scene, and that morph looks like a jarring intro cut. We
+        # trim that first second off the final concat below.
         if keyframe_url:
             print(f"[render {job_id}] scene 0 keyframe generated: {keyframe_url}")
             current_ref = keyframe_url
@@ -1446,6 +1469,7 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
             # as the first frame. It'll show as the opening ~0.5s but the render
             # completes fast rather than 2-3 min on R2V.
             print(f"[render {job_id}] keyframe generation failed ({kf_err}); using raw reference as first frame")
+            used_raw_ref_as_opener = True
     j = JOBS.get(job_id)
     if j is not None:
         j["render_mode"] = "sequential" if use_sequential else "single"
@@ -1494,6 +1518,34 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
 
     # Preserve original scene order for concat regardless of completion order.
     scene_paths: list[Path] = [scene_paths_by_idx[i] for i in range(len(scenes))]
+
+    # When we fell back to the raw reference image as scene 0's opening frame
+    # (because nano-banana keyframe generation failed — usually a celebrity/IP
+    # filter block), H3 Max needs ~1s of ramp-up to morph the still into the
+    # actual scene. That morph reads as a jarring intro cut to a completely
+    # different-looking scene. Trim the first second of scene 0 so the video
+    # starts once the morph has resolved and identity is correct.
+    if used_raw_ref_as_opener and scene_paths:
+        scene0 = scene_paths[0]
+        trimmed = scene0.with_name(scene0.stem + "_trimmed.mp4")
+        try:
+            r = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-ss", "1.0", "-i", str(scene0),
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                    "-c:a", "aac", "-b:a", "192k",
+                    "-avoid_negative_ts", "make_zero",
+                    str(trimmed),
+                ],
+                capture_output=True, timeout=90,
+            )
+            if r.returncode == 0 and trimmed.exists() and trimmed.stat().st_size > 1000:
+                scene_paths[0] = trimmed
+                print(f"[render {job_id}] trimmed 1.0s from scene 0 (raw-ref opener morph)")
+            else:
+                print(f"[render {job_id}] scene 0 trim failed rc={r.returncode}; using untrimmed")
+        except Exception as e:  # noqa: BLE001
+            print(f"[render {job_id}] scene 0 trim crashed: {e}; using untrimmed")
 
     # All scenes rendered — stitch
     j = JOBS.get(job_id)
