@@ -699,15 +699,28 @@ def generate_scene0_keyframe(
 
 
 
-def plan_scenes(total_seconds: int) -> list[int]:
-    """Split total seconds into H3-compatible chunks (10s at a time; last may be smaller).
+# fal H3 Max rejects any scene with duration < 5s ("Input should be greater
+# than or equal to 5"). We snap to the supported set (6, 8, 10) rather than
+# the legacy MiniMax-native set (4, 6, 8, 10) so no scene ever fails
+# validation. If the tail would be under 6s, we roll it into the previous
+# scene by extending that scene rather than emitting a too-short final one.
+_FAL_SCENE_DURATIONS = (6, 8, 10)
+_FAL_MIN_DURATION = 6
 
-    H3 native durations are 4, 6, 8, 10 seconds. We use 10s for all but the final
-    scene, and pick the closest supported length for the tail.
+def plan_scenes(total_seconds: int) -> list[int]:
+    """Split total seconds into fal H3-compatible chunks.
+
+    fal validates duration >= 5, so we snap to (6, 8, 10). Never emit a
+    scene shorter than 6s — that used to happen when total_seconds%10 was
+    small (e.g. 62s → [10,10,10,10,10,10,2]) and fal would 400 the last
+    scene, failing the whole render.
+
+    For totals that don't divide cleanly, we round the tail up to the
+    nearest supported length (yielding a video slightly longer than asked,
+    up to 5s over). Users get a full-length render instead of a failure.
     """
     if total_seconds <= 10:
-        # snap up to closest supported length
-        for d in (4, 6, 8, 10):
+        for d in _FAL_SCENE_DURATIONS:
             if total_seconds <= d:
                 return [d]
         return [10]
@@ -715,10 +728,13 @@ def plan_scenes(total_seconds: int) -> list[int]:
     tail = total_seconds - full * 10
     scenes = [10] * full
     if tail > 0:
-        for d in (4, 6, 8, 10):
+        # Snap tail up to the nearest supported length (>=6)
+        tail_dur = None
+        for d in _FAL_SCENE_DURATIONS:
             if tail <= d:
-                scenes.append(d)
+                tail_dur = d
                 break
+        scenes.append(tail_dur or 10)
     return scenes
 
 
