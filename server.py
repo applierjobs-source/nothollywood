@@ -23,6 +23,7 @@ from auth import require_user, get_user
 from prompt_expander import expand_prompt, plan_outline
 from franchise_ref import (
     resolve_franchise_ref,
+    _match_public_figure,
     resolve_scene_character_refs,
     extract_show_title,
     extract_show_info,
@@ -2575,18 +2576,48 @@ async def plan(
 
     scenes_plan = plan_scenes(duration)
 
-    # Show detection. Skip candidate search on a miss and return an empty
-    # candidates list; the frontend will render the storyboard with a
-    # 'no reference required' banner and let the user hit Generate anyway.
-    # extract_show_info gives us kind + year so the picker doesn't pull
-    # anime/game fanart when the show name (e.g. 'Raymond') collides.
-    info = extract_show_info(prompt)
-    title = info[0] if info else None
+    # Public-figure fast-path: real people (Scott Adams, etc.) aren't
+    # "shows" so Grok's show extractor returns NONE for them, which used
+    # to leave the plan flow with zero candidates and pop the "No cast
+    # frames came back" dialog. Match aliases first and seed the baked-in
+    # reference as the sole candidate so the user sees their curated ref
+    # at the top of the picker and can hit Generate immediately.
+    figure = _match_public_figure(prompt)
+    info = None
+    if not figure:
+        # Show detection. Skip candidate search on a miss and return an empty
+        # candidates list; the frontend will render the storyboard with a
+        # 'no reference required' banner and let the user hit Generate anyway.
+        # extract_show_info gives us kind + year so the picker doesn't pull
+        # anime/game fanart when the show name (e.g. 'Raymond') collides.
+        info = extract_show_info(prompt)
+    title = (figure[0] if figure else (info[0] if info else None))
     kind = info[1] if info else "unknown"
     year = info[2] if info else None
     candidates: list[dict] = []
     slug: str | None = None
-    if title:
+    if figure:
+        # Public figure path: serve the baked-in ref directly (no DDG
+        # search, no Grok Imagine fallback). If somehow the file is
+        # missing on disk we fall through to an empty candidate list and
+        # let the user upload their own.
+        _canonical, slug = figure
+        if PUBLIC_ORIGIN:
+            for prefix in ("v2-", ""):
+                for ext in ("png", "jpg", "webp"):
+                    cached = FRANCHISE_REFS / f"{prefix}{slug}.{ext}"
+                    if cached.exists() and cached.stat().st_size >= 5_000:
+                        candidates.append({
+                            "url": f"{PUBLIC_ORIGIN}/static/franchise-refs/{cached.name}",
+                            "thumbnail": f"{PUBLIC_ORIGIN}/static/franchise-refs/{cached.name}",
+                            "width": 0,
+                            "height": 0,
+                            "source": "figure",
+                        })
+                        break
+                if candidates:
+                    break
+    elif title:
         slug = _slugify_title(title)
         # Serve any pre-baked cache hit as the first option so users see
         # 'this is what we already have for this show' at the top.
