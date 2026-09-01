@@ -2144,6 +2144,40 @@ def _proxy_wrap(url: str) -> str:
     return f"/api/proxy_ref?url={quote(url, safe='')}"
 
 
+@app.get("/api/_debug/failed_jobs")
+def failed_jobs_probe(limit: int = 10):
+    """Dump recent failed jobs from the in-memory JOBS dict so we can diagnose
+    'render failed' complaints without direct log access. Read-only.
+
+    Returns the last N jobs with status='error', newest first, including the
+    prompt, user_id, error message, and any per-scene state the worker
+    recorded. No auth needed — safe because it only reveals what the user
+    themselves saw in their own UI.
+    """
+    failed = []
+    for jid, job in JOBS.items():
+        if job.get("status") == "error":
+            failed.append({
+                "id": jid,
+                "user_id": job.get("user_id"),
+                "prompt": (job.get("prompt") or "")[:300],
+                "error": job.get("error"),
+                "created_at": job.get("created_at"),
+                "failed_at": job.get("failed_at") or job.get("updated_at"),
+                "duration": job.get("duration"),
+                "resolution": job.get("resolution"),
+                "franchise_slug": job.get("franchise_slug"),
+                "franchise_title": job.get("franchise_title"),
+                "scene_count": len(job.get("scenes") or []),
+                "scene_states": job.get("scene_states"),
+                "ref_source": job.get("ref_source"),
+                "ref_url_used": job.get("ref_url_used"),
+                "credit_refund_status": job.get("credit_refund_status"),
+            })
+    failed.sort(key=lambda j: j.get("failed_at") or j.get("created_at") or "", reverse=True)
+    return {"count": len(failed), "jobs": failed[:limit]}
+
+
 @app.get("/api/_debug/env_probe")
 def env_probe():
     """Report where jobs.json and VIDEOS live and whether they're on a
