@@ -797,33 +797,100 @@ def extract_last_frame(video_path: Path, out_path: Path) -> bool:
         return False
 
 
+def _probe_video_audio_durations(path: Path) -> tuple[float, float]:
+    """Return (video_duration_s, audio_duration_s). Missing audio → 0.0."""
+    vdur = 0.0
+    adur = 0.0
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=duration", "-of", "csv=p=0", str(path)],
+            capture_output=True, timeout=15,
+        )
+        vdur = float(r.stdout.strip() or 0.0)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=duration", "-of", "csv=p=0", str(path)],
+            capture_output=True, timeout=15,
+        )
+        adur = float(r.stdout.strip() or 0.0)
+    except Exception:  # noqa: BLE001
+        pass
+    return vdur, adur
+
+
 def concat_scenes(scene_paths: list[Path], out_path: Path) -> tuple[bool, str]:
-    """Concatenate an ordered list of mp4s into one mp4 using ffmpeg's concat demuxer."""
-    listfile = out_path.with_suffix(".txt")
-    listfile.write_text("\n".join(f"file '{p}'" for p in scene_paths))
+    """Concatenate an ordered list of mp4s into one mp4.
+
+    Uses the ffmpeg concat FILTER (not the demuxer + stream copy) because
+    H3 Max scenes come back with audio durations that don't always match
+    video duration to the frame. The concat demuxer with -c copy silently
+    accumulates drift and can drop the audio track entirely partway through
+    (bug: 57s Rick and Morty video had audio ending at 29s despite 57s of
+    video, because scene 3 had 5.5s audio for 28s video).
+
+    Per-input pipeline:
+      - Video: fps=24, even dimensions, yuv420p
+      - Audio: aresample to sync PTS, then apad + atrim to exactly match
+        the scene's video duration. Fills short-audio scenes with silence
+        rather than dropping them; the concat filter then produces one
+        continuous audio track across the entire output.
+    """
+    if not scene_paths:
+        return False, "no scenes"
+
+    inputs: list[str] = []
+    filter_parts: list[str] = []
+    concat_labels: list[str] = []
+    scene_count = len(scene_paths)
+
+    for i, path in enumerate(scene_paths):
+        inputs += ["-i", str(path)]
+        vdur, adur = _probe_video_audio_durations(path)
+        if vdur <= 0:
+            return False, f"scene {i} has no readable video duration"
+
+        filter_parts.append(
+            f"[{i}:v]fps=24,scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1,format=yuv420p[v{i}]"
+        )
+        if adur > 0:
+            # apad extends short audio to at least vdur; atrim caps at
+            # exactly vdur so audio and video align to the same length
+            filter_parts.append(
+                f"[{i}:a]aresample=async=1:first_pts=0,"
+                f"apad,atrim=duration={vdur:.6f},"
+                f"aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a{i}]"
+            )
+        else:
+            # Scene has no audio stream at all — synthesize silence
+            filter_parts.append(
+                f"aevalsrc=0:d={vdur:.6f}:sample_rate=44100:channel_layout=stereo,"
+                f"aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a{i}]"
+            )
+        concat_labels += [f"[v{i}]", f"[a{i}]"]
+
+    concat_expr = "".join(concat_labels) + f"concat=n={scene_count}:v=1:a=1[outv][outa]"
+    filter_complex = ";".join(filter_parts) + ";" + concat_expr
+
     try:
         result = subprocess.run(
             [
-                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                "-i", str(listfile),
-                "-c", "copy", str(out_path),
+                "ffmpeg", "-y",
+                *inputs,
+                "-filter_complex", filter_complex,
+                "-map", "[outv]", "-map", "[outa]",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+                "-movflags", "+faststart",
+                str(out_path),
             ],
-            capture_output=True, timeout=180,
+            capture_output=True, timeout=600,
         )
         if result.returncode != 0:
-            # fall back to re-encoding if streams don't match for stream copy
-            result = subprocess.run(
-                [
-                    "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                    "-i", str(listfile),
-                    "-c:v", "libx264", "-c:a", "aac", "-preset", "fast",
-                    str(out_path),
-                ],
-                capture_output=True, timeout=300,
-            )
-        listfile.unlink(missing_ok=True)
-        if result.returncode != 0:
-            return False, result.stderr.decode(errors="ignore")[-400:]
+            return False, result.stderr.decode(errors="ignore")[-600:]
         return True, ""
     except Exception as e:  # noqa: BLE001
         return False, str(e)
@@ -1385,32 +1452,45 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
             on_status=_on_status, ref_mode=ref_mode,
         )
 
-        # QC gate: if the render came back but the video has a >1.5s frozen
-        # segment, H3 likely produced a stuck title card / still frame
-        # instead of moving footage. Retry ONCE with a motion-forcing suffix
-        # rather than shipping a bad scene. Only checks when render itself
-        # succeeded — a hard failure still short-circuits to the caller.
-        if ok and scene_out.exists() and _has_long_freeze(scene_out, min_freeze_s=1.5):
-            print(f"[render {job_id}] scene {idx} froze >1.5s \u2014 retrying with motion suffix")
-            motion_suffix = (
-                " CRITICAL: every second must show continuous movement of the "
-                "subject \u2014 characters gesturing, walking, changing expression, "
-                "or the camera moving. NO static shots, NO frozen frames, NO "
-                "held title cards, NO on-screen text."
-            )
-            ok2, err2 = render_one_scene(
-                scene_prompt + motion_suffix, dur, resolution, scene_ref_url, scene_out,
-                on_status=_on_status, ref_mode=ref_mode,
-            )
-            if ok2 and not _has_long_freeze(scene_out, min_freeze_s=1.5):
-                print(f"[render {job_id}] scene {idx} motion retry succeeded")
-                ok, err = ok2, err2
-            else:
-                # Retry didn't fix it — accept the original (or new) output rather
-                # than failing the whole render. A slightly frozen scene is
-                # better than losing the whole video.
-                print(f"[render {job_id}] scene {idx} still frozen after retry; shipping anyway")
+        # QC gate: after H3 returns, check for two failure modes and retry
+        # ONCE if either is present. A hard render failure short-circuits.
+        #   1. Long frozen segment (>1.5s) — stuck title card / still frame
+        #   2. Audio much shorter than video (>3s gap) — H3 sometimes
+        #      returns a scene with a truncated audio stream (bug: R&M
+        #      scene 3 had 5.5s audio for 28s video, causing the final
+        #      concatenated video to fall silent 30s early)
+        if ok and scene_out.exists():
+            has_freeze = _has_long_freeze(scene_out, min_freeze_s=1.5)
+            vdur, adur = _probe_video_audio_durations(scene_out)
+            audio_short = vdur > 0 and adur > 0 and (vdur - adur) > 3.0
+            audio_missing = vdur > 0 and adur == 0
+
+            if has_freeze or audio_short or audio_missing:
+                reason_parts = []
+                if has_freeze: reason_parts.append("freeze>1.5s")
+                if audio_short: reason_parts.append(f"audio_short({vdur:.1f}s/{adur:.1f}s)")
+                if audio_missing: reason_parts.append("audio_missing")
+                print(f"[render {job_id}] scene {idx} QC failed: {','.join(reason_parts)} \u2014 retrying")
+
+                motion_suffix = (
+                    " CRITICAL: every second must show continuous movement of the "
+                    "subject \u2014 characters gesturing, walking, changing expression, "
+                    "or the camera moving. NO static shots, NO frozen frames, NO "
+                    "held title cards, NO on-screen text. Dialogue and sound must "
+                    "continue throughout the entire scene."
+                )
+                ok2, err2 = render_one_scene(
+                    scene_prompt + motion_suffix, dur, resolution, scene_ref_url, scene_out,
+                    on_status=_on_status, ref_mode=ref_mode,
+                )
                 if ok2:
+                    v2, a2 = _probe_video_audio_durations(scene_out)
+                    freeze2 = _has_long_freeze(scene_out, min_freeze_s=1.5)
+                    audio_ok2 = v2 > 0 and a2 > 0 and (v2 - a2) <= 3.0
+                    if not freeze2 and audio_ok2:
+                        print(f"[render {job_id}] scene {idx} QC retry succeeded")
+                    else:
+                        print(f"[render {job_id}] scene {idx} still bad after retry; shipping anyway")
                     ok, err = ok2, err2
 
         # Terminal state update (render_one_scene doesn't call on_status on exit)
