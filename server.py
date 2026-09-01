@@ -16,7 +16,7 @@ from threading import Thread
 import requests
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from auth import require_user, get_user
@@ -2775,9 +2775,31 @@ def list_jobs(request: Request):
 app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
 
+# Hash the frontend bundle on startup so /?v=<hash> forces a cold cache load
+# whenever we ship new JS/CSS. Without this, browsers pin app.js forever and
+# users see stale UX (e.g. John still hits the 'reference required' block
+# because his cached app.js predates the empty-state upload button).
+def _asset_version() -> str:
+    import hashlib
+    h = hashlib.sha1()
+    for name in ("app.js", "styles.css", "index.html"):
+        p = STATIC / name
+        if p.exists():
+            h.update(p.read_bytes())
+    return h.hexdigest()[:10]
+
+_ASSET_VERSION = _asset_version()
+print(f"[assets] version={_ASSET_VERSION}")
+
+
 @app.get("/")
 def index():
-    return FileResponse(str(STATIC / "index.html"))
+    # Rewrite <script src="app.js"> and <link href="styles.css"> to include
+    # the version tag so a fresh deploy busts every user's browser cache.
+    html = (STATIC / "index.html").read_text()
+    html = html.replace('href="styles.css"', f'href="styles.css?v={_ASSET_VERSION}"')
+    html = html.replace('src="app.js"', f'src="app.js?v={_ASSET_VERSION}"')
+    return HTMLResponse(html)
 
 
 # Also serve the frontend assets at the root so that when deploy_website
