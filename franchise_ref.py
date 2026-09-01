@@ -908,6 +908,44 @@ def _generate_cast_still_xai(title: str) -> Optional[tuple[bytes, str]]:
 # Public entrypoint
 # ---------------------------------------------------------------------------
 
+# Public figures (real people) we auto-attach a reference frame for. Unlike
+# TV shows -- which are identified via Grok's show-info extractor -- these
+# are matched by a simple lowercase substring probe against the prompt so
+# the lookup is fast, deterministic, and free (no LLM roundtrip).
+#
+# The value is the slug we look for on disk (BAKED_IN or v2-prefixed).
+# Aliases let colloquial variations ("scott a.", "@realscottadams") still
+# hit the same reference. Add new figures here as we curate their refs.
+_PUBLIC_FIGURE_ALIASES: dict[str, str] = {
+    "scott adams": "scott-adams",
+    "scottadams": "scott-adams",
+    "realscottadams": "scott-adams",
+    "dilbert creator": "scott-adams",
+}
+
+
+def _match_public_figure(prompt: str) -> Optional[tuple[str, str]]:
+    """Return (canonical_name, slug) if the prompt names a curated public
+    figure. Case-insensitive substring match on word boundaries.
+
+    Fast, deterministic, no LLM call. Runs before the show extractor so
+    a prompt like 'Scott Adams reviews his coffee' auto-attaches the
+    scott-adams.png reference frame even though Scott Adams isn't a TV
+    show. Never raises.
+    """
+    if not prompt:
+        return None
+    lowered = prompt.lower()
+    # Longest alias first so 'scott adams' beats 'scott' if we ever add 'scott'.
+    for alias in sorted(_PUBLIC_FIGURE_ALIASES.keys(), key=len, reverse=True):
+        if alias in lowered:
+            slug = _PUBLIC_FIGURE_ALIASES[alias]
+            # Canonical name = slug with first letter of each dash-segment upper.
+            canonical = " ".join(w.capitalize() for w in slug.split("-"))
+            return (canonical, slug)
+    return None
+
+
 def resolve_franchise_ref(
     prompt: str,
     *,
@@ -916,13 +954,41 @@ def resolve_franchise_ref(
 ) -> Optional[dict]:
     """Given a user prompt and no user upload, return
         {"url": "<https url>", "slug": "<slug>", "title": "<title>",
-         "source": "cache" | "search" | "generated"}
+         "source": "cache" | "search" | "generated" | "figure"}
     or None if we couldn't figure out a show or produce a reference.
 
     Never raises. Every subsystem failure logs and returns None.
     """
     if not prompt or not public_origin:
         return None
+
+    franchise_refs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Fast-path: curated public figure (real people, not TV shows). Matches
+    # a lowercase alias in the prompt and serves the on-disk baked-in
+    # reference. Skip the show extractor entirely on hit -- Grok would
+    # return NONE for 'Scott Adams delivers a monologue' since he's not
+    # a show.
+    fig = _match_public_figure(prompt)
+    if fig:
+        canonical, slug = fig
+        # Baked-in files live at <slug>.<ext> (no cache-schema prefix)
+        # because they're hand-curated and never invalidated. Curated v2-
+        # cache files also win here since they'd be even fresher.
+        for prefix in ("v2-", ""):
+            for ext in ("png", "jpg", "webp"):
+                cached = franchise_refs_dir / f"{prefix}{slug}.{ext}"
+                if cached.exists() and cached.stat().st_size >= 5_000:
+                    return {
+                        "url": f"{public_origin}/static/franchise-refs/{cached.name}",
+                        "slug": slug,
+                        "title": canonical,
+                        "source": "figure",
+                    }
+        # Alias matched but the ref file is missing -- log and fall
+        # through to the show extractor rather than 404ing silently.
+        print(f"[franchise_ref] public figure alias hit ('{canonical}') "
+              f"but no ref file at slug='{slug}' -- falling through")
 
     info = extract_show_info(prompt)
     if not info:
@@ -932,8 +998,6 @@ def resolve_franchise_ref(
     slug = slugify(title)
     if not slug:
         return None
-
-    franchise_refs_dir.mkdir(parents=True, exist_ok=True)
 
     # Cache-schema version. Bump whenever the search/generation pipeline
     # changes materially so old cached frames (e.g. drifted Grok outputs
