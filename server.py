@@ -2058,6 +2058,71 @@ def public_config():
     }
 
 
+@app.get("/api/_debug/plan_probe")
+def plan_probe(prompt: str, duration: int = 6):
+    """Unauthed probe that runs the /api/plan pipeline and reports exactly
+    where it fails or what it returns. Zach uses this from the agent sandbox
+    to diagnose 'preview modal never shows candidates' bugs on Railway.
+
+    Safe to expose publicly: it returns the same public search results a
+    signed-in user would see, and does not touch any user's library.
+    """
+    import traceback, time
+    out = {"prompt": prompt, "duration": duration, "steps": []}
+    try:
+        t0 = time.time()
+        info = extract_show_info(prompt)
+        title = info[0] if info else None
+        kind = info[1] if info else "unknown"
+        year = info[2] if info else None
+        out["steps"].append({"step": "extract_show_info", "ms": int((time.time()-t0)*1000),
+                             "title": title, "kind": kind, "year": year})
+        if not title:
+            out["result"] = "no_title_detected"
+            return out
+        slug = _slugify_title(title)
+        out["slug"] = slug
+
+        # Cache check
+        cached_hit = None
+        for ext in ("png", "jpg", "webp"):
+            p = FRANCHISE_REFS / f"v2-{slug}.{ext}"
+            if p.exists() and p.stat().st_size >= 5_000:
+                cached_hit = p.name
+                break
+        out["cached"] = cached_hit
+        out["public_origin"] = PUBLIC_ORIGIN
+
+        # DDG
+        t1 = time.time()
+        try:
+            cands = search_candidates_duckduckgo(title, want=6, kind=kind, year=year)
+            out["steps"].append({"step": "ddg", "ms": int((time.time()-t1)*1000),
+                                 "returned": len(cands),
+                                 "first_url": cands[0]["url"] if cands else None})
+        except Exception as e:
+            out["steps"].append({"step": "ddg", "ms": int((time.time()-t1)*1000),
+                                 "error": f"{type(e).__name__}: {e}",
+                                 "tb": traceback.format_exc()[-500:]})
+            cands = []
+
+        # xAI fallback probe (do NOT actually generate — too slow / expensive)
+        if not cands and not cached_hit:
+            try:
+                from franchise_ref import _generate_cast_still_xai, XAI_API_KEY
+                out["xai_available"] = bool(XAI_API_KEY)
+            except Exception as e:
+                out["xai_available"] = f"import_error: {e}"
+
+        out["result"] = "ok"
+        out["total_candidates"] = (1 if cached_hit else 0) + len(cands)
+    except Exception as e:
+        out["result"] = "error"
+        out["error"] = f"{type(e).__name__}: {e}"
+        out["tb"] = traceback.format_exc()[-1000:]
+    return out
+
+
 @app.post("/api/plan")
 async def plan(
     request: Request,
