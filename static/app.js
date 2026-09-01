@@ -312,7 +312,7 @@ function updateEstimate() {
   const perSec = res === "1080P" ? 0.13 : 0.08;
   const cost = d * perSec;
   const scenes = sceneCount(d);
-  // Per-scene MiniMax H3 render time from observed reAPI jobs:
+  // Per-scene MiniMax H3 render time from observed fal jobs:
   //   768P: ~40s low / ~80s high per scene
   //   1080P: ~70s low / ~140s high per scene
   // Add ~4s per scene for download + a flat 8s ffmpeg concat when >1 scene.
@@ -671,19 +671,63 @@ function openPreview(plan) {
 
 function renderRefTiles(cands) {
   el.previewRefs.innerHTML = "";
+  let loaded = 0;
+  let failed = 0;
+
+  const checkAllFailed = () => {
+    // If every tile failed, surface it — the empty-state upload button in
+    // the composer is the escape hatch, but we shouldn't leave a silent
+    // empty grid.
+    if (failed === cands.length && loaded === 0) {
+      const note = document.createElement("div");
+      note.className = "preview-refs-note";
+      note.textContent = "Reference images failed to load. Try More options, or upload your own below.";
+      el.previewRefs.appendChild(note);
+    }
+  };
+
   cands.forEach((c, idx) => {
       const div = document.createElement("div");
       div.className = "preview-ref";
       div.dataset.url = c.url;
       div.dataset.idx = idx;
       const src = c.thumbnail || c.url;
-      div.innerHTML = `
-        <img src="${src}" alt="reference ${idx + 1}" loading="lazy" referrerpolicy="no-referrer"
-             onerror="this.parentElement.style.display='none'" />
-        ${c.source === "cache" ? '<span class="badge">Saved</span>' : ""}
-        <span class="check">✓</span>
-      `;
+      const img = document.createElement("img");
+      img.alt = `reference ${idx + 1}`;
+      img.loading = "lazy";
+      // Same-origin proxied URLs don't need no-referrer; leaving it doesn't
+      // hurt for the third-party fallback path.
+      img.referrerPolicy = "no-referrer";
+      img.src = src;
+      img.addEventListener("load", () => { loaded += 1; });
+      img.addEventListener("error", () => {
+        // Fallback: try the raw URL if the proxied one failed for any reason.
+        if (c._raw && img.src !== c._raw) {
+          img.src = c._raw;
+          return;
+        }
+        failed += 1;
+        div.classList.add("preview-ref-broken");
+        // Replace img with a subtle broken-image marker instead of vanishing
+        // silently. User can still click other tiles, or use the upload path.
+        div.innerHTML = '<div class="preview-ref-fallback">image unavailable</div>';
+        checkAllFailed();
+      });
+      div.appendChild(img);
+      if (c.source === "cache") {
+        const badge = document.createElement("span");
+        badge.className = "badge";
+        badge.textContent = "Saved";
+        div.appendChild(badge);
+      }
+      const check = document.createElement("span");
+      check.className = "check";
+      check.textContent = "✓";
+      div.appendChild(check);
+
       div.addEventListener("click", () => {
+        // Don't allow selecting broken tiles — they'd fail at generate time.
+        if (div.classList.contains("preview-ref-broken")) return;
         el.previewRefs.querySelectorAll(".preview-ref").forEach((n) => n.classList.remove("selected"));
         div.classList.add("selected");
       });
@@ -1245,7 +1289,7 @@ function renderTile(job) {
     const finalPct = isStitching ? 96 : pct;
 
     // Aggregate ETA: use median per-scene ETA * (remaining scenes / concurrency).
-    // reAPI concurrency is 4; slowest-scene wall-clock model gives an honest bound.
+    // fal concurrency is 4; slowest-scene wall-clock model gives an honest bound.
     const scenesState = Array.isArray(job.scenes_state) ? job.scenes_state : [];
     const perSceneEta = scenesState.length
       ? Math.max(30, ...scenesState.map((s) => s.eta_seconds || 60))

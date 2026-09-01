@@ -32,7 +32,7 @@ from franchise_ref import (
 )
 
 # Video provider: fal.ai H3 Max (fast). Renders a 5s 768p clip with synced audio
-# in ~6-10s wall-clock. Full migration from reAPI (~2min) on 2026-08-31.
+# in ~6-10s wall-clock. Full migration from fal (~2min) on 2026-08-31.
 #
 # Endpoint routing:
 #   - Text-only:            minimax/h3-max/text-to-video      (~6s)
@@ -166,7 +166,7 @@ JOBS_FILE = ROOT / "jobs.json"
 
 SCENES = ROOT / "scenes"  # per-scene mp4s before concat
 FRAMES = STATIC / "frames"  # reference frames (uploads + extracted last frames)
-                            # served publicly at /static/frames/<name> so reAPI
+                            # served publicly at /static/frames/<name> so fal
                             # can fetch them for first_frame_url
 FRANCHISE_REFS = STATIC / "franchise-refs"  # curated cast reference frames
                                             # one per franchise slug
@@ -267,8 +267,8 @@ def grok_headers() -> dict:
 
 
 # Substrings that indicated MiniMax direct rejected the prompt for policy reasons.
-# Kept for the Grok fallback path but effectively dead now that reAPI runs H3
-# with content_filter:false — reAPI won't return these strings for policy issues.
+# Kept for the Grok fallback path but effectively dead now that fal runs H3
+# with content_filter:false — fal won't return these strings for policy issues.
 # The Grok fallback code below is left in place as a break-glass option, but the
 # earlier research confirmed Grok's public API also doesn't support NSFW output,
 # so this path will not help with real content-policy failures.
@@ -574,9 +574,9 @@ def fetch_task(task_id: str) -> dict:
         _, rest = task_id.split(":", 1)
         endpoint, request_id = rest.rsplit(":", 1)
         return _fetch_fal(endpoint, request_id)
-    # Legacy reAPI task ids from before the migration are silently failed;
+    # Legacy fal task ids from before the migration are silently failed;
     # they'll appear as failed renders and users can regenerate. This branch
-    # is defensive; JOBS should not contain any in-flight reAPI ids.
+    # is defensive; JOBS should not contain any in-flight fal ids.
     return {"status": "failed", "error": {"message": "provider retired"}}
 
 
@@ -825,7 +825,7 @@ def _download_video(url: str, out_path: Path) -> tuple[bool, str]:
 
 
 # Poll intervals. Tighter = faster wall-clock because we detect completion
-# sooner. reAPI and Grok Imagine both tolerate rapid polling comfortably at
+# sooner. fal and Grok Imagine both tolerate rapid polling comfortably at
 # 3s. We also apply a mild backoff after the first minute since long-running
 # jobs are unlikely to complete on the very next poll and rapid polling only
 # helps near the end.
@@ -1073,9 +1073,9 @@ def send_completion_email(user_email: str, job: dict) -> None:
         print(f"[email {job.get('id','?')}] send failed: {e}")
 
 
-# Max scenes rendering concurrently. reAPI can handle several jobs in parallel;
+# Max scenes rendering concurrently. fal can handle several jobs in parallel;
 # this bounds our exposure to their rate limits and to token bucket bursts.
-# Env-tunable so we can back off if reAPI starts 429ing under load.
+# Env-tunable so we can back off if fal starts 429ing under load.
 SCENE_CONCURRENCY = int(os.environ.get("SCENE_CONCURRENCY", "4"))
 # Threshold at/below which we prefer sequential frame-chaining over parallel
 # rendering. Chaining preserves character continuity but N× wall-clock.
@@ -1139,7 +1139,7 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
             job["ref_slug"] = info.get("slug")
             save_jobs(JOBS)
 
-    # scene_states tracks the status string reported by reAPI for each scene
+    # scene_states tracks the status string reported by fal for each scene
     # so we can compute an aggregate progress signal for the UI.
     scene_states: dict[int, str] = {i: "queued" for i in range(len(scenes))}
     scene_started_at: dict[int, float] = {}
@@ -2058,6 +2058,162 @@ def public_config():
     }
 
 
+# Cache of proxied image bytes so we don't re-fetch every DDG hotlink hit
+_PROXY_CACHE: dict[str, tuple[bytes, str, float]] = {}
+_PROXY_CACHE_TTL = 3600.0   # 1 hour
+_PROXY_CACHE_MAX = 200      # bounded LRU-ish
+
+@app.get("/api/proxy_ref")
+def proxy_ref(url: str):
+    """Server-side image proxy for reference-picker candidates.
+
+    Many DDG-returned image hosts (ew.com, colliderimages.com, static0.srcdn.com,
+    futurecdn.net, etc.) refuse hotlinks from third-party origins even with
+    referrerpolicy=no-referrer. The candidate grid in the plan modal then
+    silently hides those tiles (onerror handler in renderRefTiles), and
+    users see 'no reference images'.
+
+    Fix: fetch the image from OUR origin with a browser-like UA, cache the
+    bytes for an hour, and re-serve. The browser sees a same-origin request
+    that always succeeds.
+
+    Only http(s) URLs are allowed; the response is cached in memory (bounded
+    to 200 entries) so a busy picker session doesn't hammer the third-party
+    hosts. If the fetch fails we return 502 with a tiny transparent PNG so
+    the tile still renders (user can pick a different one or upload).
+    """
+    import time
+    if not url or not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "bad url")
+    # Only proxy image-ish extensions or content types we control after fetch
+    now = time.time()
+    hit = _PROXY_CACHE.get(url)
+    if hit and (now - hit[2]) < _PROXY_CACHE_TTL:
+        body, ct, _ = hit
+        return Response(content=body, media_type=ct, headers={"Cache-Control": "public, max-age=3600"})
+    try:
+        r = requests.get(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                              "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                # Send a plausible Referer matching the target host so hotlink
+                # protections that check Referer accept it.
+                "Referer": "/".join(url.split("/")[:3]) + "/",
+            },
+            timeout=10,
+            allow_redirects=True,
+        )
+        if r.status_code != 200 or not r.content:
+            raise HTTPException(502, f"upstream {r.status_code}")
+        ct = r.headers.get("content-type", "image/jpeg").split(";")[0].strip() or "image/jpeg"
+        if not ct.startswith("image/"):
+            raise HTTPException(502, "not an image")
+        body = r.content[:12_000_000]  # 12 MB cap per image
+        # Simple bounded cache eviction
+        if len(_PROXY_CACHE) >= _PROXY_CACHE_MAX:
+            oldest = min(_PROXY_CACHE.items(), key=lambda kv: kv[1][2])[0]
+            _PROXY_CACHE.pop(oldest, None)
+        _PROXY_CACHE[url] = (body, ct, now)
+        return Response(content=body, media_type=ct, headers={"Cache-Control": "public, max-age=3600"})
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[proxy_ref] {url[:80]} failed: {e}")
+        # 1x1 transparent PNG so the tile still shows (user can skip / upload)
+        px = bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+                           "0000000d49444154789c626001000000050001"
+                           "0d0a2db40000000049454e44ae426082")
+        return Response(content=px, media_type="image/png", status_code=502)
+
+
+def _proxy_wrap(url: str) -> str:
+    """Wrap a third-party image URL to go through /api/proxy_ref.
+
+    Skip our own origins (they don't need proxying and shouldn't add a hop).
+    """
+    if not url or not url.startswith(("http://", "https://")):
+        return url
+    # Don't proxy our own domain(s) — that would infinite-loop
+    if PUBLIC_ORIGIN and url.startswith(PUBLIC_ORIGIN):
+        return url
+    if "nothollywood.ai" in url or "nothollywood-production.up.railway.app" in url:
+        return url
+    from urllib.parse import quote
+    return f"/api/proxy_ref?url={quote(url, safe='')}"
+
+
+@app.get("/api/_debug/library_probe")
+def library_probe(user_id: str):
+    """Unauthed diagnostic that dumps what /api/library would return for a
+    given user_id, including per-row signing status. Public but harmless:
+    the signed URLs are the same 1-hour URLs the user would get in-app.
+
+    Only used to diagnose 'videos not showing in library' bugs remotely,
+    since we can't sign in as another user from this sandbox.
+    """
+    import traceback
+    import library as _lib
+    out = {"user_id": user_id, "rows": []}
+    try:
+        # Retroactive rescue for this user's jobs (same logic as /api/library)
+        rescued = 0
+        for jid, job in list(JOBS.items()):
+            if job.get("user_id") != user_id:
+                continue
+            if job.get("status") != "done":
+                continue
+            if job.get("saved_to_library"):
+                continue
+            video_rel = job.get("video") or ""
+            if not video_rel.startswith("/static/videos/"):
+                continue
+            local_path = VIDEOS / f"{jid}.mp4"
+            if not local_path.exists() or local_path.stat().st_size == 0:
+                continue
+            meta = {
+                "title": job.get("franchise_title"),
+                "slug": job.get("franchise_slug"),
+                "duration": job.get("duration") or sum(job.get("scenes") or []),
+                "resolution": job.get("resolution"),
+                "scene_count": len(job.get("scenes") or [1]),
+                "scenes": job.get("scenes") or [],
+                "franchise_ref_url": job.get("ref_url_used") or job.get("franchise_ref_url"),
+            }
+            ok_save = _lib.save_render_to_library(
+                job_id=jid, user_id=user_id, prompt=job.get("prompt") or "",
+                video_path=local_path, meta=meta,
+            )
+            if ok_save:
+                job["saved_to_library"] = True
+                save_jobs(JOBS)
+                rescued += 1
+        out["retroactive_rescued"] = rescued
+
+        rows = _lib.list_renders(user_id)
+        out["row_count"] = len(rows)
+        for row in rows:
+            sp = row.get("storage_path") or ""
+            entry = {"id": row.get("id"), "created": row.get("created_at"),
+                     "storage_path": sp, "bytes": row.get("bytes"),
+                     "duration": row.get("duration")}
+            if sp.startswith("LOCAL:"):
+                local_file = VIDEOS / sp.split(":", 1)[1]
+                entry["backend"] = "local"
+                entry["exists_on_disk"] = local_file.exists()
+                entry["disk_size"] = local_file.stat().st_size if local_file.exists() else 0
+            else:
+                entry["backend"] = "supabase"
+                signed = _lib.signed_url_for(sp, ttl_seconds=600)
+                entry["signable"] = bool(signed)
+            out["rows"].append(entry)
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+        out["tb"] = traceback.format_exc()[-1500:]
+    return out
+
+
 @app.get("/api/_debug/plan_probe")
 def plan_probe(prompt: str, duration: int = 6):
     """Unauthed probe that runs the /api/plan pipeline and reports exactly
@@ -2317,7 +2473,16 @@ async def regenerate_refs(
             continue
         if w and h and (w < 320 or h < 180):
             continue
-        out.append({"url": url, "width": w, "height": h, "thumbnail": thumb, "source": "search"})
+        # Proxy third-party URLs through our origin so hotlink-protected
+        # hosts (ew.com, colliderimages, futurecdn, srcdn, etc.) always load
+        # in the browser. Keeps original URL in _raw for debugging.
+        out.append({
+            "url": _proxy_wrap(url),
+            "_raw": url,
+            "width": w, "height": h,
+            "thumbnail": _proxy_wrap(thumb),
+            "source": "search",
+        })
         if len(out) >= 6:
             break
     return {"candidates": out, "query_used": search_q}
@@ -2603,7 +2768,7 @@ async def generate(
         except json.JSONDecodeError:
             raise HTTPException(400, "chosen_outline is not valid JSON")
 
-    # Save uploaded reference under /static/frames/ so reAPI can fetch it.
+    # Save uploaded reference under /static/frames/ so fal can fetch it.
     ref_url: str | None = None
     ref_source: str = "none"  # "upload" | "franchise" | "chosen" | "none"
     if reference is not None:
@@ -2619,25 +2784,32 @@ async def generate(
             ref_url = f"{PUBLIC_ORIGIN}/static/frames/{ref_name}"
             ref_source = "upload"
         # If PUBLIC_ORIGIN is unset (dev with no public URL), we silently drop
-        # the reference. Better than sending a data URL that reAPI will reject.
-    elif chosen_ref_url and chosen_ref_url.startswith("http"):
-        # User picked a candidate in /api/plan. Try to download it to our own
-        # /static/franchise-refs/ so reAPI gets a URL we control (avoids CDN
-        # hotlink protection and 403s on third-party image URLs).
-        # If download fails we still pass the raw URL and hope reAPI can fetch
-        # it — worst case the render falls back to no-reference.
+        # the reference. Better than sending a data URL that fal will reject.
+    elif chosen_ref_url and (chosen_ref_url.startswith("http") or chosen_ref_url.startswith("/api/proxy_ref")):
+        # User picked a candidate in /api/plan. The candidate URL may be:
+        #  - A raw third-party URL (older client, or our own cached URL)
+        #  - Our /api/proxy_ref?url=<encoded> wrapper (new client) — unwrap first
+        # Then download to /static/franchise-refs/ so fal gets a URL we
+        # control (avoids CDN hotlink protection / 403s from image models).
+        raw_url = chosen_ref_url
+        if chosen_ref_url.startswith("/api/proxy_ref"):
+            from urllib.parse import urlparse, parse_qs, unquote
+            qs = parse_qs(urlparse(chosen_ref_url).query)
+            raw_url = unquote((qs.get("url") or [""])[0]) or chosen_ref_url
         try:
-            result = _download_and_validate(chosen_ref_url)
+            result = _download_and_validate(raw_url)
             if result is not None and PUBLIC_ORIGIN:
                 blob, ext = result
                 out = FRANCHISE_REFS / f"chosen_{job_id}.{ext}"
                 out.write_bytes(blob)
                 ref_url = f"{PUBLIC_ORIGIN}/static/franchise-refs/{out.name}"
             else:
-                ref_url = chosen_ref_url  # last-resort passthrough
+                # Only pass raw http(s) URLs to the model; our proxy path is
+                # not reachable from fal.
+                ref_url = raw_url if raw_url.startswith("http") else None
         except Exception as e:  # noqa: BLE001
             print(f"[generate] chosen_ref_url download failed: {e}")
-            ref_url = chosen_ref_url
+            ref_url = raw_url if raw_url.startswith("http") else None
         ref_source = "chosen"
     # NB: If no upload and no chosen_ref_url, the legacy path still applies:
     # multi_scene_worker will call resolve_franchise_ref itself before scene 1
