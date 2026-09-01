@@ -2144,6 +2144,36 @@ def _proxy_wrap(url: str) -> str:
     return f"/api/proxy_ref?url={quote(url, safe='')}"
 
 
+@app.get("/api/_debug/env_probe")
+def env_probe():
+    """Report where jobs.json and VIDEOS live and whether they're on a
+    persistent Railway volume. Read-only.
+    """
+    import os, shutil
+    def stat(p: Path) -> dict:
+        try:
+            usage = shutil.disk_usage(str(p.parent if not p.is_dir() else p))
+            return {
+                "path": str(p),
+                "exists": p.exists(),
+                "is_dir": p.is_dir(),
+                "num_files": len(list(p.iterdir())) if p.exists() and p.is_dir() else None,
+                "disk_total_gb": round(usage.total / 1e9, 2),
+                "disk_free_gb": round(usage.free / 1e9, 2),
+            }
+        except Exception as e:
+            return {"path": str(p), "error": str(e)}
+    return {
+        "ROOT": str(ROOT),
+        "VIDEOS": stat(VIDEOS),
+        "JOBS_FILE": stat(JOBS_FILE),
+        "env_RAILWAY_VOLUME_MOUNT_PATH": os.environ.get("RAILWAY_VOLUME_MOUNT_PATH"),
+        "env_RAILWAY_VOLUME_NAME": os.environ.get("RAILWAY_VOLUME_NAME"),
+        "env_PUBLIC_ORIGIN": PUBLIC_ORIGIN,
+        "videos_sample": sorted([p.name for p in VIDEOS.iterdir()])[:10] if VIDEOS.exists() else [],
+    }
+
+
 @app.get("/api/_debug/library_probe")
 def library_probe(user_id: str):
     """Unauthed diagnostic that dumps what /api/library would return for a
