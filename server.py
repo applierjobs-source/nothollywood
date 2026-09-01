@@ -754,6 +754,33 @@ def plan_scenes(total_seconds: int) -> list[int]:
     return scenes
 
 
+def _has_long_freeze(video_path: Path, min_freeze_s: float = 1.5) -> bool:
+    """Return True if ffmpeg's freezedetect finds any frozen span longer than
+    `min_freeze_s` in the video. Used as a QC gate on scene renders — H3
+    Max occasionally emits scenes that are mostly a static frame (e.g. a
+    misspelled title card held for 3s), and we want to retry those.
+
+    Runs in a subprocess with a 30s timeout so a hung ffmpeg can never
+    block a render. Returns False on any failure — we'd rather ship a
+    scene we couldn't check than block on QC.
+    """
+    try:
+        r = subprocess.run(
+            [
+                "ffmpeg", "-i", str(video_path),
+                "-vf", f"freezedetect=n=0.003:d={min_freeze_s}",
+                "-map", "0:v:0", "-f", "null", "-",
+            ],
+            capture_output=True, timeout=30,
+        )
+        # freezedetect writes to stderr, e.g.:
+        # [freezedetect @ ...] lavfi.freezedetect.freeze_duration: 3.333333
+        stderr = r.stderr.decode(errors="ignore")
+        return "freeze_duration" in stderr
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def extract_last_frame(video_path: Path, out_path: Path) -> bool:
     """Grab the final frame of a video as a PNG. Returns True on success."""
     try:
@@ -1357,6 +1384,35 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
             scene_prompt, dur, resolution, scene_ref_url, scene_out,
             on_status=_on_status, ref_mode=ref_mode,
         )
+
+        # QC gate: if the render came back but the video has a >1.5s frozen
+        # segment, H3 likely produced a stuck title card / still frame
+        # instead of moving footage. Retry ONCE with a motion-forcing suffix
+        # rather than shipping a bad scene. Only checks when render itself
+        # succeeded — a hard failure still short-circuits to the caller.
+        if ok and scene_out.exists() and _has_long_freeze(scene_out, min_freeze_s=1.5):
+            print(f"[render {job_id}] scene {idx} froze >1.5s \u2014 retrying with motion suffix")
+            motion_suffix = (
+                " CRITICAL: every second must show continuous movement of the "
+                "subject \u2014 characters gesturing, walking, changing expression, "
+                "or the camera moving. NO static shots, NO frozen frames, NO "
+                "held title cards, NO on-screen text."
+            )
+            ok2, err2 = render_one_scene(
+                scene_prompt + motion_suffix, dur, resolution, scene_ref_url, scene_out,
+                on_status=_on_status, ref_mode=ref_mode,
+            )
+            if ok2 and not _has_long_freeze(scene_out, min_freeze_s=1.5):
+                print(f"[render {job_id}] scene {idx} motion retry succeeded")
+                ok, err = ok2, err2
+            else:
+                # Retry didn't fix it — accept the original (or new) output rather
+                # than failing the whole render. A slightly frozen scene is
+                # better than losing the whole video.
+                print(f"[render {job_id}] scene {idx} still frozen after retry; shipping anyway")
+                if ok2:
+                    ok, err = ok2, err2
+
         # Terminal state update (render_one_scene doesn't call on_status on exit)
         scene_states[idx] = "succeeded" if ok else "failed"
         scene_finished_at[idx] = time.time()
