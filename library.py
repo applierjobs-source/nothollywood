@@ -252,27 +252,63 @@ def save_render_to_library(
     meta = meta or {}
     bytes_ = video_path.stat().st_size
 
-    # 1) Upload the MP4 (with retry). If it fails, park the whole save in the
-    # persistent queue so the background reaper can retry after any transient
-    # Supabase / network hiccup clears.
+    # 1) Upload the MP4 (with retry). Two failure modes matter here:
+    #   - Transient (5xx / network): retry a few times inline; if still failing,
+    #     park in the persistent queue and let the reaper try later.
+    #   - Permanent (413 EntityTooLarge from Supabase's per-file cap): the
+    #     bucket physically can't hold this file. Instead of dropping the row,
+    #     record the render with a LOCAL: sentinel so /api/library serves it
+    #     from Railway's static-videos volume. The row survives redeploys of
+    #     the app code, the mp4 survives on the mounted volume, and the user
+    #     never loses the render again.
+    #
+    # NB: local-served rows have `storage_path='LOCAL:{job_id}.mp4'` and no
+    # thumb_path. /api/library special-cases this prefix.
     storage_path = f"{user_id}/{job_id}.mp4"
     ok, err = _upload_to_storage(storage_path, video_path, "video/mp4")
+    served_locally = False
     if not ok:
-        _enqueue_pending(job_id, user_id, prompt, video_path, meta,
-                         f"mp4 upload failed: {err}")
-        return False
+        # Distinguish the size cap from other 4xx / 5xx errors. A 413 is
+        # permanent for this project's plan tier — no amount of retrying
+        # will move a >50 MB file into the Free-tier bucket.
+        is_size_cap = ("413" in err) or ("EntityTooLarge" in err) or ("Payload too large" in err.lower() if err else False)
+        if is_size_cap:
+            print(f"[library] {job_id} exceeds Supabase per-file cap; "
+                  f"falling back to LOCAL-served row so it stays in the library")
+            storage_path = f"LOCAL:{job_id}.mp4"
+            served_locally = True
+        else:
+            _enqueue_pending(job_id, user_id, prompt, video_path, meta,
+                             f"mp4 upload failed: {err}")
+            return False
 
     # 2) Best-effort thumbnail. If it fails, we still record the render row
-    # and the frontend will just show a video-icon placeholder.
+    # and the frontend will just show a video-icon placeholder. Skip the
+    # thumbnail entirely for LOCAL-served rows — they'd hit the same 413 for
+    # any thumb over the cap, and a JPEG thumb is small enough to serve
+    # locally too if we ever need it.
     thumb_path_str: Optional[str] = None
     tmp_thumb = video_path.parent / f"{job_id}_thumb.jpg"
     if _extract_thumbnail(video_path, tmp_thumb):
-        thumb_storage = f"{user_id}/{job_id}_thumb.jpg"
-        thumb_ok, _ = _upload_to_storage(thumb_storage, tmp_thumb, "image/jpeg")
-        if thumb_ok:
-            thumb_path_str = thumb_storage
+        if served_locally:
+            # Keep the JPEG on disk so /static/videos/<id>.jpg can serve it;
+            # server.py's own worker already writes this path when the render
+            # completes, so this is defensive only.
+            try:
+                local_thumb_dest = video_path.parent / f"{job_id}.jpg"
+                if not local_thumb_dest.exists():
+                    tmp_thumb.replace(local_thumb_dest)
+                thumb_path_str = f"LOCAL:{job_id}.jpg"
+            except Exception:
+                pass
+        else:
+            thumb_storage = f"{user_id}/{job_id}_thumb.jpg"
+            thumb_ok, _ = _upload_to_storage(thumb_storage, tmp_thumb, "image/jpeg")
+            if thumb_ok:
+                thumb_path_str = thumb_storage
         try:
-            tmp_thumb.unlink()
+            if tmp_thumb.exists():
+                tmp_thumb.unlink()
         except Exception:
             pass
 

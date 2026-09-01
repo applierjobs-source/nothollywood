@@ -2320,12 +2320,36 @@ async def get_library(request: Request):
     rows = _lib.list_renders(user_id)
     out = []
     for row in rows:
-        video_url = _lib.signed_url_for(row.get("storage_path") or "", ttl_seconds=3600)
-        thumb_url = _lib.signed_url_for(row.get("thumb_path") or "", ttl_seconds=3600) if row.get("thumb_path") else None
-        if not video_url:
-            # Row exists but the storage object was purged or signing failed —
-            # skip so the frontend doesn't render a broken tile.
-            continue
+        storage_path = row.get("storage_path") or ""
+        thumb_path = row.get("thumb_path") or ""
+
+        # LOCAL-served rows: the mp4 was too big for Supabase's per-file cap,
+        # so we recorded the row with a LOCAL: sentinel and kept the file on
+        # the Railway persistent volume. Serve it straight from the static
+        # route — same URL the just-finished-render UI uses.
+        if storage_path.startswith("LOCAL:"):
+            local_name = storage_path.split(":", 1)[1]
+            local_file = VIDEOS / local_name
+            if not local_file.exists() or local_file.stat().st_size == 0:
+                # File got wiped from disk (rare — usually a deploy on a
+                # non-persistent volume). Skip the tile so the frontend
+                # doesn't render a broken player.
+                print(f"[library] LOCAL row {row.get('id')} points at missing file {local_file}")
+                continue
+            video_url = f"/static/videos/{local_name}"
+            if thumb_path.startswith("LOCAL:"):
+                thumb_name = thumb_path.split(":", 1)[1]
+                thumb_file = VIDEOS / thumb_name
+                thumb_url = f"/static/videos/{thumb_name}" if thumb_file.exists() else None
+            else:
+                thumb_url = None
+        else:
+            video_url = _lib.signed_url_for(storage_path, ttl_seconds=3600)
+            thumb_url = _lib.signed_url_for(thumb_path, ttl_seconds=3600) if thumb_path else None
+            if not video_url:
+                # Row exists but the storage object was purged or signing failed —
+                # skip so the frontend doesn't render a broken tile.
+                continue
         out.append({
             "id": row.get("id"),
             "prompt": row.get("prompt"),
