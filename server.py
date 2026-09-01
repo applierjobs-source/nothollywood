@@ -227,6 +227,22 @@ app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
+@app.on_event("startup")
+def _bootstrap_library_reaper():
+    """Kick off the library save-queue reaper. Any render whose Supabase
+    persistence failed on completion (network blip, 5xx, etc.) is parked in
+    pending_saves.json on the same persistent volume as jobs.json; the
+    reaper retries it every few minutes and drops it once the source mp4 is
+    gone from the local disk. Without this thread, users notice missing
+    library rows before we do.
+    """
+    try:
+        import library as _lib
+        _lib.start_reaper(interval_s=180.0)
+    except Exception as _e:
+        print(f"[startup] library reaper failed to start (non-fatal): {_e}")
+
+
 def load_jobs() -> dict:
     if JOBS_FILE.exists():
         return json.loads(JOBS_FILE.read_text())
@@ -2617,6 +2633,30 @@ def debug_all_jobs(request: Request):
             "error": j.get("error"),
         })
     return {"total": len(items), "jobs": out}
+
+
+@app.get("/api/_debug/pending_saves")
+def debug_pending_saves(request: Request):
+    """Admin-only view of the persistent library save-retry queue. Any render
+    that failed to persist to Supabase on completion lives here until the
+    reaper drains it. Zach uses this to diagnose the "my library is missing
+    a render" class of bugs.
+
+    Header: X-Admin-Token: <ADMIN_TOKEN>
+    """
+    import os as _os
+    admin_token = _os.environ.get("ADMIN_TOKEN", "")
+    if not admin_token:
+        return JSONResponse({"error": "admin token not configured"}, status_code=503)
+    supplied = request.headers.get("X-Admin-Token", "")
+    if supplied != admin_token:
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    try:
+        import library as _lib
+        entries = _lib._load_pending()
+        return {"total": len(entries), "entries": entries}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.get("/api/jobs")

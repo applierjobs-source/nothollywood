@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import json
 import time
+import threading
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -35,6 +36,96 @@ SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or ""
 BUCKET = "renders"
 _REQ_TIMEOUT = 30
+
+# ---------------------------------------------------------------------------
+# Retry + persistent save queue
+# ---------------------------------------------------------------------------
+#
+# Renders used to silently disappear from user libraries when a Supabase
+# upload timed out or returned a transient 5xx during the one-shot save at
+# render-completion time. The retroactive rescue in /api/library only worked
+# while the local .mp4 still existed on Railway's disk, which is wiped on
+# every deploy. Users noticed by pinging Zach; we noticed by reading logs.
+#
+# Fix: every save that fails writes a row to pending_saves.json (on the same
+# persistent volume as jobs.json / static/videos). A background thread
+# started by server.py pops entries off that queue and retries every couple
+# of minutes until success. Success removes the entry.
+#
+# Data model (list of dicts, newest first):
+#   {"job_id": str, "user_id": str, "prompt": str, "video_path": str,
+#    "meta": {...}, "attempts": int, "last_error": str,
+#    "last_attempt_ts": float, "enqueued_ts": float}
+
+ROOT = Path(__file__).resolve().parent
+PENDING_SAVES_FILE = ROOT / "pending_saves.json"
+_PENDING_LOCK = threading.Lock()
+
+
+def _load_pending() -> list[dict]:
+    if not PENDING_SAVES_FILE.exists():
+        return []
+    try:
+        with open(PENDING_SAVES_FILE) as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        print(f"[library] pending_saves.json read failed: {e}")
+        return []
+
+
+def _save_pending(entries: list[dict]) -> None:
+    try:
+        tmp = PENDING_SAVES_FILE.with_suffix(".json.tmp")
+        with open(tmp, "w") as f:
+            json.dump(entries, f, indent=2)
+        tmp.replace(PENDING_SAVES_FILE)
+    except Exception as e:
+        print(f"[library] pending_saves.json write failed: {e}")
+
+
+def _enqueue_pending(job_id: str, user_id: str, prompt: str,
+                    video_path: Path, meta: dict, error: str) -> None:
+    """Add a failed save to the retry queue. Deduplicates on job_id so
+    repeated failures accumulate attempt count on a single row.
+    """
+    with _PENDING_LOCK:
+        entries = _load_pending()
+        now = time.time()
+        found = False
+        for e in entries:
+            if e.get("job_id") == job_id:
+                e["attempts"] = int(e.get("attempts", 0)) + 1
+                e["last_error"] = error
+                e["last_attempt_ts"] = now
+                found = True
+                break
+        if not found:
+            entries.insert(0, {
+                "job_id": job_id,
+                "user_id": user_id,
+                "prompt": prompt,
+                "video_path": str(video_path),
+                "meta": meta or {},
+                "attempts": 1,
+                "last_error": error,
+                "last_attempt_ts": now,
+                "enqueued_ts": now,
+            })
+        _save_pending(entries)
+        print(f"[library] pending save queued: {job_id} ({len(entries)} in queue)")
+
+
+def _dequeue_pending(job_id: str) -> None:
+    with _PENDING_LOCK:
+        entries = _load_pending()
+        new = [e for e in entries if e.get("job_id") != job_id]
+        if len(new) != len(entries):
+            _save_pending(new)
+
+
+def pending_count() -> int:
+    return len(_load_pending())
 
 
 def _svc_headers(json_ct: bool = False) -> dict:
@@ -78,32 +169,51 @@ def _extract_thumbnail(video_path: Path, out_path: Path) -> bool:
         return False
 
 
-def _upload_to_storage(storage_path: str, local_path: Path, content_type: str) -> bool:
-    """POST a file into Supabase Storage. Overwrite if the object already
-    exists (x-upsert=true) — makes retries idempotent when a job resubmits.
+def _upload_to_storage(storage_path: str, local_path: Path, content_type: str,
+                       max_attempts: int = 4) -> tuple[bool, str]:
+    """POST a file into Supabase Storage with exponential backoff. Overwrites
+    if the object already exists (x-upsert=true) so retries are idempotent.
+
+    Returns (ok, error_message). error_message is empty on success.
+
+    Retries on network exceptions and 5xx responses; a 4xx is treated as a
+    permanent failure and we bail immediately (invalid path, auth, bucket).
     """
     if not library_enabled():
-        return False
+        return False, "library not enabled"
     url = f"{SUPABASE_URL}/storage/v1/object/{BUCKET}/{storage_path}"
-    try:
-        with open(local_path, "rb") as f:
-            r = requests.post(
-                url,
-                headers={
-                    **_svc_headers(),
-                    "Content-Type": content_type,
-                    "x-upsert": "true",
-                },
-                data=f,
-                timeout=120,
-            )
-        if r.status_code >= 300:
-            print(f"[library] upload {storage_path} failed ({r.status_code}): {r.text[:200]}")
-            return False
-        return True
-    except Exception as e:
-        print(f"[library] upload {storage_path} exception: {e}")
-        return False
+    last_err = ""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with open(local_path, "rb") as f:
+                r = requests.post(
+                    url,
+                    headers={
+                        **_svc_headers(),
+                        "Content-Type": content_type,
+                        "x-upsert": "true",
+                    },
+                    data=f,
+                    timeout=120,
+                )
+            if r.status_code < 300:
+                return True, ""
+            last_err = f"HTTP {r.status_code}: {r.text[:200]}"
+            # 4xx = permanent (bad path, auth, bucket missing). Don't retry.
+            if 400 <= r.status_code < 500:
+                print(f"[library] upload {storage_path} permanent failure: {last_err}")
+                return False, last_err
+            print(f"[library] upload {storage_path} attempt {attempt}/{max_attempts} "
+                  f"failed: {last_err}")
+        except Exception as e:
+            last_err = f"exception: {e}"
+            print(f"[library] upload {storage_path} attempt {attempt}/{max_attempts} "
+                  f"exception: {e}")
+        if attempt < max_attempts:
+            # Backoff: 2s, 4s, 8s. Cap short so render-completion path stays
+            # snappy; the persistent queue handles longer-term retries.
+            time.sleep(2 ** attempt)
+    return False, last_err
 
 
 def save_render_to_library(
@@ -142,10 +252,14 @@ def save_render_to_library(
     meta = meta or {}
     bytes_ = video_path.stat().st_size
 
-    # 1) Upload the MP4
+    # 1) Upload the MP4 (with retry). If it fails, park the whole save in the
+    # persistent queue so the background reaper can retry after any transient
+    # Supabase / network hiccup clears.
     storage_path = f"{user_id}/{job_id}.mp4"
-    ok = _upload_to_storage(storage_path, video_path, "video/mp4")
+    ok, err = _upload_to_storage(storage_path, video_path, "video/mp4")
     if not ok:
+        _enqueue_pending(job_id, user_id, prompt, video_path, meta,
+                         f"mp4 upload failed: {err}")
         return False
 
     # 2) Best-effort thumbnail. If it fails, we still record the render row
@@ -154,7 +268,8 @@ def save_render_to_library(
     tmp_thumb = video_path.parent / f"{job_id}_thumb.jpg"
     if _extract_thumbnail(video_path, tmp_thumb):
         thumb_storage = f"{user_id}/{job_id}_thumb.jpg"
-        if _upload_to_storage(thumb_storage, tmp_thumb, "image/jpeg"):
+        thumb_ok, _ = _upload_to_storage(thumb_storage, tmp_thumb, "image/jpeg")
+        if thumb_ok:
             thumb_path_str = thumb_storage
         try:
             tmp_thumb.unlink()
@@ -179,25 +294,116 @@ def save_render_to_library(
         "bytes": bytes_,
     }
     url = f"{SUPABASE_URL}/rest/v1/renders"
-    try:
-        r = requests.post(
-            url,
-            headers={
-                **_svc_headers(json_ct=True),
-                "Prefer": "resolution=merge-duplicates,return=minimal",
-            },
-            data=json.dumps(row),
-            timeout=_REQ_TIMEOUT,
-        )
-        if r.status_code >= 300:
-            print(f"[library] insert row failed ({r.status_code}): {r.text[:300]}")
-            return False
-    except Exception as e:
-        print(f"[library] insert row exception: {e}")
+    row_err = ""
+    for attempt in range(1, 4):  # 3 tries: immediate, +2s, +4s
+        try:
+            r = requests.post(
+                url,
+                headers={
+                    **_svc_headers(json_ct=True),
+                    "Prefer": "resolution=merge-duplicates,return=minimal",
+                },
+                data=json.dumps(row),
+                timeout=_REQ_TIMEOUT,
+            )
+            if r.status_code < 300:
+                row_err = ""
+                break
+            row_err = f"HTTP {r.status_code}: {r.text[:200]}"
+            if 400 <= r.status_code < 500:
+                print(f"[library] insert row permanent failure: {row_err}")
+                break
+            print(f"[library] insert row attempt {attempt}/3 failed: {row_err}")
+        except Exception as e:
+            row_err = f"exception: {e}"
+            print(f"[library] insert row attempt {attempt}/3 exception: {e}")
+        if attempt < 3:
+            time.sleep(2 ** attempt)
+
+    if row_err:
+        # Mp4 (and maybe thumb) are already in Supabase Storage; only the DB
+        # row is missing. Queue for retry — storage upsert is idempotent so
+        # a re-run just overwrites bytes-identical objects and then inserts.
+        _enqueue_pending(job_id, user_id, prompt, video_path, meta,
+                         f"row insert failed: {row_err}")
         return False
 
+    # Success — remove any previous queued entry for this job.
+    _dequeue_pending(job_id)
     print(f"[library] saved {job_id} for {user_id} ({bytes_/1024/1024:.1f}MB)")
     return True
+
+
+# ---------------------------------------------------------------------------
+# Reaper: retry pending saves in the background
+# ---------------------------------------------------------------------------
+
+_REAPER_STARTED = False
+
+
+def _reaper_loop(interval_s: float) -> None:
+    """Wake up every `interval_s` seconds, pop each pending save, and try it
+    again. Runs forever inside a daemon thread — dies with the process.
+    """
+    while True:
+        try:
+            time.sleep(interval_s)
+            pending = _load_pending()
+            if not pending:
+                continue
+            print(f"[library] reaper: {len(pending)} pending saves to retry")
+            for entry in list(pending):
+                job_id = entry.get("job_id") or ""
+                user_id = entry.get("user_id") or ""
+                video_path = Path(entry.get("video_path") or "")
+                if not video_path.exists():
+                    # The local mp4 got wiped (deploy, disk cleanup). Nothing
+                    # to re-upload — drop the entry and log loudly so the
+                    # operator can decide whether to recover from a backup.
+                    print(f"[library] reaper: dropping {job_id}, source mp4 "
+                          f"missing at {video_path}")
+                    _dequeue_pending(job_id)
+                    continue
+                # Cap attempts so a permanently-broken job doesn't spin forever
+                # (bad user_id column, bucket removed, etc.). 20 attempts at
+                # 3-minute intervals ≈ 1 hour of retries.
+                if int(entry.get("attempts", 0)) >= 20:
+                    print(f"[library] reaper: giving up on {job_id} after "
+                          f"{entry.get('attempts')} attempts; last error: "
+                          f"{entry.get('last_error')}")
+                    _dequeue_pending(job_id)
+                    continue
+                try:
+                    save_render_to_library(
+                        job_id=job_id,
+                        user_id=user_id,
+                        prompt=entry.get("prompt") or "",
+                        video_path=video_path,
+                        meta=entry.get("meta") or {},
+                    )
+                except Exception as e:
+                    print(f"[library] reaper: {job_id} raised: {e}")
+        except Exception as e:
+            # Reaper must never die. Log and keep looping.
+            print(f"[library] reaper loop exception (continuing): {e}")
+
+
+def start_reaper(interval_s: float = 180.0) -> None:
+    """Idempotently start the background reaper. Safe to call multiple times
+    (subsequent calls no-op). Server.py calls this once on startup.
+    """
+    global _REAPER_STARTED
+    if _REAPER_STARTED:
+        return
+    if not library_enabled():
+        print("[library] reaper not started: library not enabled")
+        return
+    t = threading.Thread(target=_reaper_loop, args=(interval_s,),
+                         name="library-reaper", daemon=True)
+    t.start()
+    _REAPER_STARTED = True
+    print(f"[library] reaper started (interval={interval_s}s, "
+          f"pending={pending_count()})")
 
 
 def list_renders(user_id: str) -> list[dict]:
