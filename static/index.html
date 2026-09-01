@@ -300,12 +300,18 @@
                   <span>More options</span>
                 </button>
               </div>
-              <p class="preview-section-sub" id="previewRefSub">Click one to anchor the cast for every scene. Optional — skip to render without a reference.</p>
+              <p class="preview-section-sub" id="previewRefSub">Click one to anchor the cast for every scene. A reference is required — use “More options” for fresh candidates or upload your own below.</p>
             </div>
             <div class="preview-refs" id="previewRefs"></div>
-            <p class="preview-empty" id="previewRefEmpty" hidden>
-              No cast frames found for this prompt. We'll render without a reference.
-            </p>
+            <div class="preview-empty" id="previewRefEmpty" hidden>
+              <p>No cast frames came back for this prompt. Try “More options” to search again, or upload your own reference frame.</p>
+              <input type="file" id="previewRefFile" accept="image/*" hidden />
+              <button type="button" class="btn-ghost" id="previewRefUploadBtn">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                <span>Upload reference frame</span>
+              </button>
+              <p class="preview-empty-selected" id="previewRefUploadedName" hidden></p>
+            </div>
           </section>
 
           <section class="preview-section">

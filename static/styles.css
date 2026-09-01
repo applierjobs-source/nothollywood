@@ -1947,7 +1947,19 @@ textarea::placeholder { color: var(--text-faint); }
 .preview-ref.selected .check { display: flex; }
 .preview-empty { margin: 0; padding: 20px; text-align: center;
   color: var(--text-dim); border: 1px dashed var(--hair);
-  border-radius: 10px; font-size: 13px; }
+  border-radius: 10px; font-size: 13px;
+  display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.preview-empty p { margin: 0; }
+.preview-empty .btn-ghost { display: inline-flex; align-items: center; gap: 8px; }
+.preview-empty-selected {
+  margin: 0; font-size: 12px; color: var(--text);
+  padding: 4px 10px; background: rgba(106, 140, 255, 0.08);
+  border-radius: 999px;
+}
+/* Same attention pulse as .preview-refs.needs-pick, but on the empty box. */
+.preview-empty.needs-pick {
+  animation: refPickPulse 0.6s ease 0s 2;
+}
 .preview-scenes { display: flex; flex-direction: column; gap: 12px; }
 .preview-scene {
   border: 1px solid var(--hair); border-radius: 10px;

@@ -86,6 +86,9 @@ const el = {
   previewRefs: $("#previewRefs"),
   previewRefSub: $("#previewRefSub"),
   previewRefEmpty: $("#previewRefEmpty"),
+  previewRefFile: $("#previewRefFile"),
+  previewRefUploadBtn: $("#previewRefUploadBtn"),
+  previewRefUploadedName: $("#previewRefUploadedName"),
   previewScenes: $("#previewScenes"),
   previewRegenBtn: $("#previewRegenBtn"),
   previewBackBtn: $("#previewBackBtn"),
@@ -520,6 +523,33 @@ el.dropZone.addEventListener("drop", (e) => {
 });
 el.clearRefBtn.addEventListener("click", showDropEmpty);
 
+// Preview modal has its own inline upload button that appears in the empty
+// state when the ref grid comes back with zero candidates. It writes to the
+// same pendingUpload slot as the composer, so Approve just works after the
+// user picks a file. Without this, users are stuck: the picker is hidden,
+// the copy tells them to "pick one of the show stills" that don't exist,
+// and Approve keeps refusing to submit.
+if (el.previewRefUploadBtn && el.previewRefFile) {
+  el.previewRefUploadBtn.addEventListener("click", () => el.previewRefFile.click());
+  el.previewRefFile.addEventListener("change", (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    pendingUpload = f;
+    if (el.previewRefUploadedName) {
+      el.previewRefUploadedName.textContent = `Selected: ${f.name}`;
+      el.previewRefUploadedName.hidden = false;
+    }
+    // Also mirror the file into the composer's file input so if the user
+    // ever backs out and re-approves, the same file stays attached.
+    try {
+      const dt = new DataTransfer();
+      dt.items.add(f);
+      el.refFile.files = dt.files;
+      showDropPreview(f);
+    } catch { /* older browsers may not support DataTransfer for input.files */ }
+  });
+}
+
 // ─── Submit ────────────────────────────────────────────────────────
 // ---- Two-stage render flow -----------------------------------------
 // Stage 1: user submits prompt → we call /api/plan for candidates+storyboard
@@ -604,10 +634,18 @@ function openPreview(plan) {
 
   // Header: if we detected a show title, surface it in the subtitle.
   if (plan.title) {
-    el.previewSubtitle.textContent = `We think this is a "${plan.title}" episode. Pick a cast reference or skip.`;
+    el.previewSubtitle.textContent = `We think this is a "${plan.title}" episode. Pick a cast reference before approving.`;
   } else {
-    el.previewSubtitle.textContent = "Pick a reference frame (optional), then approve the storyboard.";
+    el.previewSubtitle.textContent = "Pick a reference frame, then approve the storyboard.";
   }
+
+  // Reset any per-open empty-state UI so a fresh open doesn't show a stale
+  // “Selected: <filename>” line from a previous preview session.
+  if (el.previewRefUploadedName) {
+    el.previewRefUploadedName.hidden = true;
+    el.previewRefUploadedName.textContent = "";
+  }
+  if (el.previewRefFile) el.previewRefFile.value = "";
 
   // Reference grid.
   // Show 'More options' button whenever we detected a show — lets users
@@ -836,13 +874,24 @@ el.previewApproveBtn.addEventListener("click", async () => {
   // A reference image is required. If the user didn't have an upload
   // already in the composer AND hasn't picked a candidate, stop them
   // here with a friendly nudge rather than letting the backend 400.
+  //
+  // Empty-state path: when the ref grid came back with zero candidates we
+  // hide the grid and show an inline upload button. Highlight whichever of
+  // (grid, empty-state) is currently visible so the user knows where to go.
   if (!selected && !pendingUpload) {
-    alert("Pick a reference image before continuing. Tap one of the show stills, or go back and upload your own.");
-    // Softly highlight the picker so the user sees where to click.
-    if (el.previewRefs) {
-      el.previewRefs.scrollIntoView({ behavior: "smooth", block: "center" });
-      el.previewRefs.classList.add("needs-pick");
-      setTimeout(() => el.previewRefs.classList.remove("needs-pick"), 1600);
+    const emptyShown = el.previewRefEmpty && !el.previewRefEmpty.hidden;
+    if (emptyShown) {
+      alert("No cast frames came back for this prompt. Try \u201cMore options\u201d to search again, or upload your own reference frame with the button below.");
+      el.previewRefEmpty.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.previewRefEmpty.classList.add("needs-pick");
+      setTimeout(() => el.previewRefEmpty.classList.remove("needs-pick"), 1600);
+    } else {
+      alert("Pick a reference image before continuing. Tap one of the show stills, or go back and upload your own.");
+      if (el.previewRefs) {
+        el.previewRefs.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.previewRefs.classList.add("needs-pick");
+        setTimeout(() => el.previewRefs.classList.remove("needs-pick"), 1600);
+      }
     }
     return;
   }
