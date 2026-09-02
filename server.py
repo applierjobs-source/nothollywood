@@ -3001,6 +3001,38 @@ def _proxy_wrap(url: str) -> str:
     return f"/api/proxy_ref?url={quote(url, safe='')}"
 
 
+@app.get("/api/_debug/recent_renders")
+def debug_recent_renders(hours: int = 24, limit: int = 30):
+    """Unauthed: list recent completed renders across all users.
+
+    Returns prompt, user_email, video URL, thumbnail, duration, created_at
+    so the operator can eyeball what people are actually making.
+    """
+    import time as _t
+    cutoff = _t.time() - hours * 3600
+    items = []
+    for j in JOBS.values():
+        ca = j.get("created_at", 0)
+        if ca < cutoff:
+            continue
+        if j.get("status") != "done":
+            continue
+        items.append({
+            "id": j.get("id"),
+            "user_email": j.get("user_email", ""),
+            "user_id": (j.get("user_id") or "")[:8],
+            "created_at": ca,
+            "duration": j.get("duration"),
+            "resolution": j.get("resolution"),
+            "prompt": (j.get("prompt") or "")[:200],
+            "video": j.get("video"),
+            "thumb": j.get("thumb"),
+            "show_title": j.get("show_title"),
+        })
+    items.sort(key=lambda x: x["created_at"], reverse=True)
+    return {"hours": hours, "count": len(items), "renders": items[:limit]}
+
+
 @app.get("/api/_debug/signups")
 def debug_signups(hours: int = 24):
     """Unauthed: list users created in the last N hours (default 24).
