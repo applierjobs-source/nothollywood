@@ -3003,34 +3003,92 @@ def _proxy_wrap(url: str) -> str:
 
 @app.get("/api/_debug/recent_renders")
 def debug_recent_renders(hours: int = 24, limit: int = 30):
-    """Unauthed: list recent completed renders across all users.
+    """Unauthed: list recent completed renders across ALL users, pulled
+    from the Supabase `renders` table so results survive deploys.
 
-    Returns prompt, user_email, video URL, thumbnail, duration, created_at
-    so the operator can eyeball what people are actually making.
+    Returns prompt, user_email, signed video URL, duration, created_at.
+    Signed URLs are 1h TTL (matches the /api/library contract).
     """
-    import time as _t
-    cutoff = _t.time() - hours * 3600
-    items = []
-    for j in JOBS.values():
-        ca = j.get("created_at", 0)
-        if ca < cutoff:
+    if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        return {"error": "supabase service role not configured"}
+    import library as _lib
+    from datetime import datetime, timezone
+    # 1) Pull recent rows from renders (no user_id filter — admin view)
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/renders",
+            headers={
+                "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+            },
+            params={
+                "select": "*",
+                "order": "created_at.desc",
+                "limit": str(limit),
+            },
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return {"error": f"renders fetch failed: {r.status_code} {r.text[:200]}"}
+        rows = r.json() or []
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}"}
+
+    # 2) Filter by hours + resolve emails from auth.users in one round-trip
+    cutoff = time.time() - hours * 3600
+    kept = []
+    user_ids = set()
+    for row in rows:
+        created = row.get("created_at", "")
+        try:
+            ts = datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            ts = 0
+        if ts < cutoff:
             continue
-        if j.get("status") != "done":
-            continue
-        items.append({
-            "id": j.get("id"),
-            "user_email": j.get("user_email", ""),
-            "user_id": (j.get("user_id") or "")[:8],
-            "created_at": ca,
-            "duration": j.get("duration"),
-            "resolution": j.get("resolution"),
-            "prompt": (j.get("prompt") or "")[:200],
-            "video": j.get("video"),
-            "thumb": j.get("thumb"),
-            "show_title": j.get("show_title"),
+        kept.append((row, ts))
+        if row.get("user_id"):
+            user_ids.add(row["user_id"])
+
+    # Batch email lookup via auth admin (one paginated call)
+    email_by_id = {}
+    try:
+        u = requests.get(
+            f"{SUPABASE_URL}/auth/v1/admin/users",
+            params={"per_page": 200},
+            headers={
+                "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+            },
+            timeout=10,
+        )
+        if u.ok:
+            for user in u.json().get("users", []):
+                email_by_id[user["id"]] = user.get("email", "")
+    except Exception:
+        pass
+
+    # 3) Sign each row's storage_path so we return playable URLs
+    out = []
+    for row, ts in kept:
+        sp = row.get("storage_path") or ""
+        video_url = None
+        if sp.startswith("LOCAL:"):
+            video_url = f"{PUBLIC_ORIGIN}/static/videos/{sp.split(':',1)[1]}"
+        elif sp:
+            video_url = _lib.signed_url_for(sp, ttl_seconds=3600)
+        out.append({
+            "id": row.get("id") or row.get("job_id"),
+            "user_email": email_by_id.get(row.get("user_id", ""), ""),
+            "user_id_short": (row.get("user_id") or "")[:8],
+            "created_at": row.get("created_at"),
+            "prompt": (row.get("prompt") or "")[:200],
+            "duration": row.get("duration"),
+            "resolution": row.get("resolution"),
+            "title": row.get("title"),
+            "video_url": video_url,
         })
-    items.sort(key=lambda x: x["created_at"], reverse=True)
-    return {"hours": hours, "count": len(items), "renders": items[:limit]}
+    return {"hours": hours, "count": len(out), "renders": out}
 
 
 @app.get("/api/_debug/signups")
