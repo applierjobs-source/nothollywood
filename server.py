@@ -2918,6 +2918,51 @@ def library_probe(user_id: str):
     return out
 
 
+@app.get("/api/_debug/figure_probe")
+def figure_probe(prompt: str):
+    """Unauthed probe: reports exactly what the public-figure detection
+    would do for the given prompt. No side effects, no worker start.
+
+    Used to diagnose 'voice/anchor didn't fire on Scott Adams render'
+    without needing to shell into Railway logs.
+    """
+    import franchise_ref as _fr
+    try:
+        fig_match = _match_public_figure(prompt)
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"match crashed: {type(e).__name__}: {e}"}
+    slug = fig_match[1] if fig_match else None
+    voice_id = _FIGURE_VOICES.get(slug) if slug else None
+    style = _FIGURE_STYLES.get(slug) if slug else None
+    # Reproduce the resolver's ref lookup so we know what ref_url would land
+    ref_url = None
+    if slug:
+        for prefix in ("v2-", ""):
+            for ext in ("png", "jpg", "webp"):
+                cached = FRANCHISE_REFS / f"{prefix}{slug}.{ext}"
+                if cached.exists() and cached.stat().st_size >= 5_000:
+                    ref_url = (
+                        f"{PUBLIC_ORIGIN}/static/franchise-refs/{cached.name}"
+                        if PUBLIC_ORIGIN else f"file:{cached}"
+                    )
+                    break
+            if ref_url:
+                break
+    return {
+        "prompt": prompt,
+        "figure_match": fig_match,
+        "slug": slug,
+        "voice_id": voice_id,
+        "style_name": (style[0] if style else None),
+        "has_elevenlabs_key": bool(ELEVENLABS_API_KEY),
+        "ref_url": ref_url,
+        "public_origin": PUBLIC_ORIGIN,
+        "public_figure_aliases": list(_fr._PUBLIC_FIGURE_ALIASES.keys()),
+        "would_voice_swap": bool(slug and voice_id and style and ELEVENLABS_API_KEY),
+        "would_reanchor_scenes": bool(slug and ref_url and PUBLIC_ORIGIN),
+    }
+
+
 @app.get("/api/_debug/plan_probe")
 def plan_probe(prompt: str, duration: int = 6):
     """Unauthed probe that runs the /api/plan pipeline and reports exactly
