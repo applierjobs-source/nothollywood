@@ -1585,9 +1585,15 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
     figure_display_name: str | None = None
     figure_style_hint: str | None = None
     try:
-        fig_slug = _match_public_figure(prompt)
+        # _match_public_figure returns (canonical_name, slug) or None.
+        fig_match = _match_public_figure(prompt)
     except Exception:  # noqa: BLE001
-        fig_slug = None
+        fig_match = None
+    fig_slug = fig_match[1] if fig_match else None
+    print(
+        f"[voice] job {job_id}: figure_match={fig_match} slug={fig_slug} "
+        f"has_11labs_key={bool(ELEVENLABS_API_KEY)}"
+    )
     if fig_slug and ELEVENLABS_API_KEY:
         vid = _FIGURE_VOICES.get(fig_slug)
         style_entry = _FIGURE_STYLES.get(fig_slug)
@@ -1603,6 +1609,12 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
                 _jobx["voice_clone_slug"] = fig_slug
                 _jobx["voice_clone_voice_id"] = vid
                 save_jobs(JOBS)
+        else:
+            print(
+                f"[voice] job {job_id}: slug {fig_slug!r} matched but no voice "
+                f"(_FIGURE_VOICES has {list(_FIGURE_VOICES)}) or no style "
+                f"(_FIGURE_STYLES has {list(_FIGURE_STYLES)})"
+            )
 
     # scene_states tracks the status string reported by fal for each scene
     # so we can compute an aggregate progress signal for the UI.
@@ -1994,7 +2006,47 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
         j["render_mode"] = "sequential" if use_sequential else "single"
         j["status"] = "rendering"
         save_jobs(JOBS)
+    # For public figures we DO NOT chain from the previous scene's last
+    # frame — MiniMax adds a subtle stylization each pass and by scene 3
+    # the person turns into a Family-Guy-style cartoon. Instead, we re-blend
+    # the baked-in real photo with each scene's prompt via nano-banana. Costs
+    # ~15s extra per scene but keeps identity photorealistic.
+    figure_anchor_ref: str | None = None
+    if fig_slug and PUBLIC_ORIGIN:
+        # The reference frame we already resolved lives at info["url"] but
+        # we no longer have that variable in scope — look it up on the job.
+        figure_anchor_ref = (JOBS.get(job_id) or {}).get("ref_url") or None
+        if figure_anchor_ref:
+            print(
+                f"[render {job_id}] public figure {fig_slug!r}: will re-anchor "
+                f"every scene to {figure_anchor_ref} (no frame-chain drift)"
+            )
+
     for i, dur in enumerate(scenes):
+        # Public-figure anchor: rebuild the scene N opening frame from the
+        # real photo + scene prompt instead of chaining. Scene 0 already got
+        # a keyframe above so skip re-blending it (would double-cost).
+        if figure_anchor_ref and i > 0:
+            scene_prompt_i = (
+                scene_prompts_expanded[i]
+                if i < len(scene_prompts_expanded)
+                else prompt
+            )
+            kf_url, kf_err = generate_scene0_keyframe(
+                scene_prompt=scene_prompt_i,
+                reference_urls=[figure_anchor_ref],
+                job_id=job_id,
+            )
+            if kf_url:
+                current_ref = kf_url
+                current_ref_mode = "first_frame"
+                print(f"[render {job_id}] scene {i} re-anchored to figure keyframe: {kf_url}")
+            else:
+                print(
+                    f"[render {job_id}] scene {i} keyframe re-anchor failed ({kf_err}); "
+                    f"falling back to previous scene's last frame"
+                )
+
         try:
             idx, ok, err, out_path = _render_scene(i, dur, current_ref, ref_mode=current_ref_mode)
         except Exception as e:  # noqa: BLE001
@@ -2005,8 +2057,9 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
                 first_failure = (idx, err)
             break  # stop the chain — no last frame to chain from
         scene_paths_by_idx[idx] = out_path
-        # Extract last frame for next scene's ref. If extraction or hosting
-        # fails, we degrade to "no ref" for the next scene rather than aborting.
+        # Extract last frame for next scene's ref (used as fallback if
+        # figure re-anchor fails, and always for non-figure renders). If
+        # extraction or hosting fails, we degrade to "no ref".
         if i + 1 < len(scenes):
             frame_name = f"chain_{job_id}_{i:02d}.jpg"
             frame_path = FRAMES / frame_name
@@ -3313,6 +3366,8 @@ def provider_status():
         "email_from": EMAIL_FROM if os.environ.get("RESEND_API_KEY") else None,
         "supabase_service_key": bool(os.environ.get("SUPABASE_SERVICE_ROLE_KEY")),
         "stripe": bool(os.environ.get("STRIPE_SECRET_KEY")),
+        "elevenlabs_api_key": bool(ELEVENLABS_API_KEY),
+        "figure_voices": {slug: bool(vid) for slug, vid in _FIGURE_VOICES.items()},
         "franchise_refs_cached": sorted([
             p.stem for p in FRANCHISE_REFS.glob("*") if p.is_file()
         ]),
