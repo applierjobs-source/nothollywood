@@ -1116,46 +1116,56 @@ def _llm_extract_scene_characters(show_title: str, scene_prompt: str) -> tuple[s
     if not XAI_API_KEY or not show_title:
         return ()
     system = (
-        f"You cast a scene for a video render of the show '{show_title}'. "
-        f"Return which canonical characters from this show should appear "
-        f"in the scene, in order of prominence, max 3.\n\n"
-        "Two cases:\n"
-        "1. If the scene explicitly names characters (e.g. 'Newman delivers "
-        "mail'), return exactly those named characters.\n"
-        "2. If the scene is generic (no character names, just location or "
-        "action), pick the show's main characters that best fit this scene. "
-        "For a Seinfeld apartment scene default to Jerry Seinfeld. For a "
-        "generic Monk's Diner scene, cast the group that would naturally be "
-        "there (Jerry + George, or Jerry + Elaine, etc). For a generic "
-        "Office scene at Dunder Mifflin, cast Michael Scott and whoever "
-        "the action implies.\n\n"
-        "Output: JSON array of canonical character names, max 3. Just the "
-        "array, no other text.\n\n"
+        f"You cast a scene for a video render styled after the show "
+        f"'{show_title}'. Return who should appear in the scene, in order "
+        f"of prominence, max 3.\n\n"
+        "Casting includes:\n"
+        "- Canonical fictional characters from the show (Michael Scott, "
+        "Newman, Peter Griffin).\n"
+        "- REAL public figures explicitly named OR clearly implied by the "
+        "scene, using their real name (Donald Trump, Vladimir Putin, Elon "
+        "Musk, Taylor Swift). This applies even when they aren't part of "
+        "the original show -- a mashup like 'Trump in The Office' should "
+        "cast Donald Trump, not Michael Scott.\n\n"
+        "Three cases:\n"
+        "1. Scene names characters or real people explicitly ('Newman "
+        "delivers mail', 'Trump chairs a meeting') -> return those.\n"
+        "2. Scene names a real person via descriptor ('the world's most "
+        "powerful politician', 'the richest man alive', 'the current US "
+        "president') -> return the specific real person by name.\n"
+        "3. Scene is generic (no names, no descriptors, just location or "
+        "action) -> pick the show's main characters that best fit this "
+        "scene.\n\n"
+        "Output: JSON array of canonical names, max 3. Just the array, "
+        "no other text.\n\n"
         "Examples:\n"
         '  Seinfeld / "Newman commits voter fraud in his apartment" -> '
         '["Newman"]\n'
-        '  Seinfeld / "Jerry and Newman argue about mail" -> '
-        '["Jerry Seinfeld", "Newman"]\n'
-        '  Seinfeld / "George and Elaine at the coffee shop" -> '
-        '["George Costanza", "Elaine Benes"]\n'
-        '  Seinfeld / "a coffee shop scene, morning" (generic) -> '
-        '["Jerry Seinfeld", "George Costanza"]\n'
-        '  Seinfeld / "Jerrys apartment, night" (generic) -> '
-        '["Jerry Seinfeld", "Kramer"]\n'
         '  The Office / "Michael gives a TED talk" -> ["Michael Scott"]\n'
         '  The Office / "a meeting in the conference room" (generic) -> '
         '["Michael Scott", "Dwight Schrute", "Jim Halpert"]\n'
         '  Family Guy / "the living room, chaos" (generic) -> '
-        '["Peter Griffin", "Lois Griffin", "Stewie Griffin"]\n\n'
+        '["Peter Griffin", "Lois Griffin", "Stewie Griffin"]\n'
+        '  The Office / "Trump chairs a boardroom meeting" -> '
+        '["Donald Trump"]\n'
+        '  The Office / "world leaders share a cubicle: Trump, Putin, Xi" '
+        '-> ["Donald Trump", "Vladimir Putin", "Xi Jinping"]\n'
+        "  The Office / \"the world's most powerful politician runs the "
+        "office in modern America\" -> [\"Donald Trump\"]\n"
+        '  The Office / "a political workplace mockumentary with world '
+        'leaders sharing an office" -> ["Donald Trump", "Vladimir Putin", '
+        '"Xi Jinping"]\n\n'
         "Rules:\n"
-        "- ALWAYS return at least one character from the show if the show "
-        "is known to you. Never return [] just because names weren't "
-        "explicitly stated — pick who fits.\n"
-        "- Use full canonical names (Newman, George Costanza, Michael Scott, "
-        "Peter Griffin).\n"
+        "- ALWAYS return at least one character or real person if the "
+        "prompt is intelligible. Never return [].\n"
+        "- When the prompt clearly implies a specific real person via a "
+        "descriptor, resolve to that real person's name (they change over "
+        "time -- use the person currently holding that role as of today).\n"
+        "- Use full canonical names for fictional characters (Newman, "
+        "George Costanza) and real full names for public figures (Donald "
+        "Trump, not just Trump).\n"
         "- Max 3. Order by prominence in this specific scene.\n"
-        "- Never invent characters that don't exist in the show.\n"
-        "- Only return [] if you don't recognize the show at all."
+        "- Never invent fictional characters that don't exist in the show."
     )
     body = {
         "model": XAI_MODEL,
@@ -1280,9 +1290,25 @@ def resolve_character_ref(
 
     Cache path: <franchise_refs_dir>/<show-slug>__<char-slug>.png
     Never raises. Returns None if we can't produce a valid still.
+
+    Real-public-figure fast path: if `character` matches a baked-in public
+    figure alias (Donald Trump, Scott Adams, etc.), return the curated real
+    photo directly. This is what makes a mashup like 'Trump in The Office'
+    actually show Trump instead of a Grok-fabricated look-alike.
     """
     if not show_title or not character or not public_origin:
         return None
+
+    # Public figure fast path -- serve the baked-in real photo. Match by
+    # word-boundary alias in the character name.
+    fig = _match_public_figure(character)
+    if fig:
+        _canonical, fig_slug = fig
+        for prefix in ("v2-", ""):
+            for ext in ("png", "jpg", "webp"):
+                cached = franchise_refs_dir / f"{prefix}{fig_slug}.{ext}"
+                if cached.exists() and cached.stat().st_size >= 5_000:
+                    return f"{public_origin}/static/franchise-refs/{cached.name}"
 
     show_slug = slugify(show_title)
     char_slug = _character_slug(character)
