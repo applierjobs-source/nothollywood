@@ -735,6 +735,16 @@ def _known_character_hint(prompt: str) -> str | None:
         "warm apartment/diner lighting. Jerry: thin man in jeans and white sneakers. "
         "George: short bald stocky man in glasses. Elaine: brunette curly hair, "
         "blazers. Kramer: tall lanky man, wild hair, retro shirts.",
+        # Public figures: strong photorealistic anchor. MiniMax H3 has known
+        # temporal drift where without an explicit style lock it slowly
+        # morphs into cartoon by mid-clip. "NOT animation" + "NOT cartoon"
+        # in the negative direction consistently blocks that drift.
+        "scott adams": "Scott Adams — real person, photorealistic live-action "
+        "video, documentary style, natural skin texture, natural lighting, "
+        "real 60-year-old bald man with wire-frame glasses and navy button-down "
+        "shirt in his home podcast studio. NOT animated, NOT cartoon, NOT "
+        "illustrated, NOT stylized — real cinematography of a real human being. "
+        "Handheld or locked-off camera, shallow depth of field, HD video.",
     }
     for kw, desc in catalogs.items():
         if kw in p:

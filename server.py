@@ -1781,6 +1781,21 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
                     f"{prompt}"
                 )
 
+        # Public-figure photorealism anchor: MiniMax H3 will drift from
+        # photorealistic to cartoon within a single 10s clip if the prompt
+        # doesn't explicitly nail down the style. Prepend a hard anchor
+        # every time so identity + realism hold through the whole scene.
+        if fig_slug == "scott-adams":
+            scene_prompt = (
+                "PHOTOREALISTIC LIVE-ACTION VIDEO of the real Scott Adams "
+                "(60-year-old bald man, wire-frame glasses, thin build, "
+                "navy button-down shirt). Documentary-style handheld camera, "
+                "natural skin texture, natural indoor podcast-studio lighting, "
+                "HD video. This is NOT animation, NOT a cartoon, NOT illustrated, "
+                "NOT stylized — real cinematography of a real human being. "
+                f"Scene action: {scene_prompt}"
+            )
+
         def _on_status(status: str, queue_position: int | None = None, progress_fraction: float | None = None):
             prev = scene_states.get(idx)
             scene_states[idx] = status
