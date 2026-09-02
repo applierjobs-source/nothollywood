@@ -3586,6 +3586,46 @@ def figure_probe(prompt: str):
     }
 
 
+@app.get("/api/_debug/cast_probe")
+def cast_probe(prompt: str, show: str = ""):
+    """Unauthed probe: given a scene prompt (and optional show title),
+    return the cast list Grok would extract and the ref URL each name
+    resolves to. Zach uses this to verify mashup casting after prompt or
+    alias changes -- e.g. that 'world leaders in The Office' returns
+    [Trump, Putin, Xi] with real photos instead of the Office cast.
+
+    Safe to expose: read-only, no user data.
+    """
+    from franchise_ref import (
+        _llm_extract_scene_characters,
+        resolve_character_ref,
+        extract_show_info,
+    )
+    out = {"prompt": prompt, "show_input": show or None}
+    title = show.strip() or None
+    if not title:
+        info = extract_show_info(prompt)
+        if info:
+            title = info[0]
+    out["show_resolved"] = title
+    if not title:
+        out["cast"] = []
+        out["refs"] = []
+        return out
+    cast = list(_llm_extract_scene_characters(title, prompt))
+    out["cast"] = cast
+    refs = []
+    for ch in cast:
+        u = resolve_character_ref(
+            title, ch,
+            franchise_refs_dir=FRANCHISE_REFS,
+            public_origin=PUBLIC_ORIGIN,
+        )
+        refs.append({"character": ch, "ref_url": u})
+    out["refs"] = refs
+    return out
+
+
 @app.get("/api/_debug/plan_probe")
 def plan_probe(prompt: str, duration: int = 6):
     """Unauthed probe that runs the /api/plan pipeline and reports exactly
