@@ -576,8 +576,18 @@ function showSubmitError(msg) {
   showSubmitError._t = setTimeout(() => { box.style.display = "none"; }, 4000);
 }
 
+// Global in-flight guard: testers were spam-clicking 'Send to the
+// machines' 3-15 times when the button felt unresponsive during the
+// 10-30s /api/plan wait, resulting in duplicate rendered videos. Refuse
+// re-entry until the current submit resolves or errors out.
+let submitInFlight = false;
+
 el.renderForm.addEventListener("submit", async (e) => {
   e.preventDefault();
+  if (submitInFlight) {
+    showSubmitError("Already working on this \u2014 give it a moment.");
+    return;
+  }
   // Clear any prior error banner.
   const existingErr = document.getElementById("submitError");
   if (existingErr) existingErr.style.display = "none";
@@ -588,91 +598,97 @@ el.renderForm.addEventListener("submit", async (e) => {
     el.prompt.focus();
     return;
   }
-
-  const duration = currentDuration();
-  const scenes = sceneCount(duration);
-  if (scenes > 6) {
-    const ok = window.confirm(
-      `This will render ${scenes} sequential scenes (${formatDuration(duration)} of video).\n\n` +
-      `Estimated cost: ${el.estCost.textContent}\n` +
-      `Estimated wait: ${el.estWait.textContent}\n\n` +
-      `Continue?`
-    );
-    if (!ok) return;
-  }
-
-  // Auth check: if the backend requires auth but the user isn't signed in,
-  // close the composer and open the auth modal instead of submitting.
-  if (authRequired && !currentUser) {
-    closeModal(el.composerModal);
-    setTimeout(() => openAuthModal("signin"), 200);
-    return;
-  }
-
-  // Uploaded reference short-circuits the approval flow — user's own image
-  // already answers the "which reference?" question, and they wouldn't upload
-  // an image just to have us pick a different one for them.
-  const uploadedFile = el.refFile.files?.[0] || null;
-  if (uploadedFile) {
-    pendingUpload = uploadedFile;
-    pendingPlan = null;
-    await submitGenerate({ prompt, duration });
-    return;
-  }
-
-  // No upload → fetch preview data and show approval modal.
-  pendingUpload = null;
+  submitInFlight = true;
+  // Disable the button synchronously so a second click within the same
+  // frame can't slip past the async guard above.
   el.submitBtn.disabled = true;
   const origLabel = el.submitBtn.querySelector(".btn-label").textContent;
-  el.submitBtn.querySelector(".btn-label").textContent = "Generating storyboard…";
-  // Ask (once, non-blocking) for browser-notification permission so we
-  // can ping the user when the storyboard is ready if they tabbed away.
-  if ("Notification" in window && Notification.permission === "default") {
-    try { Notification.requestPermission(); } catch (_) { /* fine */ }
-  }
-  // Show a full-composer overlay so a user who tabs away and comes back
-  // sees an unmistakable "still working" state instead of an idle-looking
-  // form. Testers reported missing the storyboard popup after switching
-  // windows.
-  showStoryboardLoading();
 
   try {
-    const fd = new FormData();
-    fd.append("prompt", prompt);
-    fd.append("duration", String(duration));
-    const r = await authedFetch(`${API}/api/plan`, { method: "POST", body: fd });
-    if (r.status === 401) {
+    const duration = currentDuration();
+    const scenes = sceneCount(duration);
+    if (scenes > 6) {
+      const ok = window.confirm(
+        `This will render ${scenes} sequential scenes (${formatDuration(duration)} of video).\n\n` +
+        `Estimated cost: ${el.estCost.textContent}\n` +
+        `Estimated wait: ${el.estWait.textContent}\n\n` +
+        `Continue?`
+      );
+      if (!ok) return;
+    }
+
+    // Auth check: if the backend requires auth but the user isn't signed in,
+    // close the composer and open the auth modal instead of submitting.
+    if (authRequired && !currentUser) {
       closeModal(el.composerModal);
       setTimeout(() => openAuthModal("signin"), 200);
-      throw new Error("session expired — sign in again");
+      return;
     }
-    if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`);
-    pendingPlan = await r.json();
-    pendingPlan._prompt = prompt;
-    pendingPlan._duration = duration;
-    pendingPlan._resolution = document.querySelector('input[name="resolution"]:checked').value;
-    hideStoryboardLoading();
-    closeModal(el.composerModal);
-    openPreview(pendingPlan);
-    // Ping user with a browser notification if the tab isn't focused --
-    // testers reported switching windows during the ~10-30s storyboard
-    // wait and missing the popup. Permission is requested inline so a
-    // no-op if the user hasn't granted it yet.
-    if (typeof document !== "undefined" && document.hidden && "Notification" in window) {
-      try {
-        if (Notification.permission === "granted") {
-          new Notification("Storyboard ready", {
-            body: "Your Not Hollywood storyboard is ready for approval.",
-            icon: "/favicon.png",
-            tag: "nh-storyboard-ready",
-          });
-        }
-      } catch (_) { /* Notification API is best-effort */ }
+
+    // Uploaded reference short-circuits the approval flow — user's own image
+    // already answers the "which reference?" question, and they wouldn't upload
+    // an image just to have us pick a different one for them.
+    const uploadedFile = el.refFile.files?.[0] || null;
+    if (uploadedFile) {
+      pendingUpload = uploadedFile;
+      pendingPlan = null;
+      await submitGenerate({ prompt, duration });
+      return;
     }
-  } catch (err) {
-    hideStoryboardLoading();
-    showSubmitError("Storyboard generation failed: " + (err.message || err));
+
+    // No upload → fetch preview data and show approval modal.
+    pendingUpload = null;
+    el.submitBtn.querySelector(".btn-label").textContent = "Generating storyboard…";
+    // Ask (once, non-blocking) for browser-notification permission so we
+    // can ping the user when the storyboard is ready if they tabbed away.
+    if ("Notification" in window && Notification.permission === "default") {
+      try { Notification.requestPermission(); } catch (_) { /* fine */ }
+    }
+    // Show a full-composer overlay so a user who tabs away and comes back
+    // sees an unmistakable "still working" state instead of an idle-looking
+    // form. Testers reported missing the storyboard popup after switching
+    // windows.
+    showStoryboardLoading();
+
+    try {
+      const fd = new FormData();
+      fd.append("prompt", prompt);
+      fd.append("duration", String(duration));
+      const r = await authedFetch(`${API}/api/plan`, { method: "POST", body: fd });
+      if (r.status === 401) {
+        closeModal(el.composerModal);
+        setTimeout(() => openAuthModal("signin"), 200);
+        throw new Error("session expired — sign in again");
+      }
+      if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`);
+      pendingPlan = await r.json();
+      pendingPlan._prompt = prompt;
+      pendingPlan._duration = duration;
+      pendingPlan._resolution = document.querySelector('input[name="resolution"]:checked').value;
+      hideStoryboardLoading();
+      closeModal(el.composerModal);
+      openPreview(pendingPlan);
+      // Ping user with a browser notification if the tab isn't focused --
+      // testers reported switching windows during the ~10-30s storyboard
+      // wait and missing the popup.
+      if (typeof document !== "undefined" && document.hidden && "Notification" in window) {
+        try {
+          if (Notification.permission === "granted") {
+            new Notification("Storyboard ready", {
+              body: "Your Not Hollywood storyboard is ready for approval.",
+              icon: "/favicon.png",
+              tag: "nh-storyboard-ready",
+            });
+          }
+        } catch (_) { /* Notification API is best-effort */ }
+      }
+    } catch (err) {
+      hideStoryboardLoading();
+      showSubmitError("Storyboard generation failed: " + (err.message || err));
+    }
   } finally {
+    // Always release the guard, no matter which return path we took.
+    submitInFlight = false;
     el.submitBtn.disabled = false;
     el.submitBtn.querySelector(".btn-label").textContent = origLabel;
   }
@@ -992,14 +1008,14 @@ el.previewRegenBtn.addEventListener("click", async () => {
     const data = await r.json();
     const cands = data.candidates || [];
     if (cands.length === 0) {
-      alert("No new options found for that variant. Try again for a different set.");
+      showPreviewError("No new options for that variant \u2014 tap again for another set.");
     } else {
       renderRefTiles(cands);
       el.previewRefEmpty.hidden = true;
       el.previewRefs.hidden = false;
     }
   } catch (err) {
-    alert("Could not fetch new options: " + (err.message || err));
+    showPreviewError("Could not fetch new options: " + (err.message || err));
   } finally {
     el.previewRegenBtn.disabled = false;
     el.previewRegenBtn.classList.remove("spinning");
@@ -1012,8 +1028,38 @@ el.previewBackBtn.addEventListener("click", () => {
   setTimeout(() => openModal(el.composerModal), 200);
 });
 
+// Same in-flight guard as the composer: testers were double-tapping
+// the approve button while /api/generate ran, producing duplicate
+// renders. Refuse re-entry until the current submit resolves.
+let approveInFlight = false;
+
+// Inline banner inside the preview modal so we never fall back to a
+// native alert() on iOS/Safari when validation or a fetch fails.
+function showPreviewError(msg) {
+  console.warn("[preview]", msg);
+  let box = document.getElementById("previewError");
+  if (!box) {
+    box = document.createElement("p");
+    box.id = "previewError";
+    box.style.cssText = "margin:10px 16px 0;color:#ff6b6b;font-size:13px;font-weight:500;";
+    // Insert just above the approve button so it's the last thing the
+    // user sees before their finger moves.
+    const anchor = el.previewApproveBtn && el.previewApproveBtn.parentNode;
+    if (anchor) anchor.insertBefore(box, el.previewApproveBtn);
+    else el.previewModal.appendChild(box);
+  }
+  box.textContent = msg;
+  box.style.display = "block";
+  clearTimeout(showPreviewError._t);
+  showPreviewError._t = setTimeout(() => { box.style.display = "none"; }, 5000);
+}
+
 el.previewApproveBtn.addEventListener("click", async () => {
   if (!pendingPlan) return;
+  if (approveInFlight) {
+    showPreviewError("Already submitting \u2014 hang tight.");
+    return;
+  }
   const selected = el.previewRefs.querySelector(".preview-ref.selected");
   // A reference image is required. If the user didn't have an upload
   // already in the composer AND hasn't picked a candidate, stop them
@@ -1025,12 +1071,12 @@ el.previewApproveBtn.addEventListener("click", async () => {
   if (!selected && !pendingUpload) {
     const emptyShown = el.previewRefEmpty && !el.previewRefEmpty.hidden;
     if (emptyShown) {
-      alert("No cast frames came back for this prompt. Try \u201cMore options\u201d to search again, or upload your own reference frame with the button below.");
+      showPreviewError("No cast frames came back \u2014 tap \u201cMore options\u201d or upload your own reference frame below.");
       el.previewRefEmpty.scrollIntoView({ behavior: "smooth", block: "center" });
       el.previewRefEmpty.classList.add("needs-pick");
       setTimeout(() => el.previewRefEmpty.classList.remove("needs-pick"), 1600);
     } else {
-      alert("Pick a reference image before continuing. Tap one of the show stills, or go back and upload your own.");
+      showPreviewError("Pick a reference image before continuing \u2014 tap one of the stills, or go back and upload your own.");
       if (el.previewRefs) {
         el.previewRefs.scrollIntoView({ behavior: "smooth", block: "center" });
         el.previewRefs.classList.add("needs-pick");
@@ -1056,6 +1102,7 @@ el.previewApproveBtn.addEventListener("click", async () => {
     }
   }
 
+  approveInFlight = true;
   el.previewApproveBtn.disabled = true;
   const origLabel = el.previewApproveBtn.querySelector(".btn-label").textContent;
   el.previewApproveBtn.querySelector(".btn-label").textContent = "Submitting…";
@@ -1072,8 +1119,9 @@ el.previewApproveBtn.addEventListener("click", async () => {
     closeModal(el.previewModal);
     pendingPlan = null;
   } catch (err) {
-    alert("Show failed: " + (err.message || err));
+    showPreviewError("Submission failed: " + (err.message || err));
   } finally {
+    approveInFlight = false;
     el.previewApproveBtn.disabled = false;
     el.previewApproveBtn.querySelector(".btn-label").textContent = origLabel;
   }
@@ -1102,7 +1150,7 @@ async function submitGenerate({ prompt, duration, resolution, chosenRefUrl, chos
     try {
       const body = await r.json();
       if (body && body.detail && body.detail.error === "reference_required") {
-        alert(body.detail.message || "A reference image is required.");
+        showSubmitError(body.detail.message || "A reference image is required.");
         throw new Error("reference required");
       }
       if (body && typeof body.detail === "string") {

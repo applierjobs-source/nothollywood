@@ -283,6 +283,44 @@ def save_jobs(jobs: dict) -> None:
 
 JOBS: dict = load_jobs()
 
+# ── Duplicate-submit guard ───────────────────────────────────────────
+# Testers reported spam-clicking "Send to the machines" 3-15 times when
+# the button felt unresponsive, producing that many duplicate renders.
+# The client now has an in-flight guard, but a page reload or a second
+# tab can still slip past it. Server-side, drop any /api/generate that
+# repeats the same (user, prompt, duration, resolution) within a short
+# window and return the ID of the render that's already queued.
+#
+# In-memory only — acceptable because Railway runs one process per
+# service; a redeploy resets it and the client guard still holds. Keyed
+# on user_id when available, else user_email, else remote IP.
+import hashlib as _hashlib_dedupe
+_RECENT_SUBMITS: dict[str, tuple[float, str]] = {}
+_DEDUPE_WINDOW_SEC = 30.0
+
+def _dedupe_fingerprint(actor: str, prompt: str, duration: int, resolution: str) -> str:
+    h = _hashlib_dedupe.sha256()
+    h.update(actor.encode("utf-8", "ignore"))
+    h.update(b"|")
+    h.update((prompt or "").strip().encode("utf-8", "ignore"))
+    h.update(f"|{duration}|{resolution}".encode("ascii"))
+    return h.hexdigest()
+
+def _check_and_mark_submit(actor: str, prompt: str, duration: int, resolution: str, job_id: str) -> str | None:
+    """Returns the id of a recent-duplicate render if one exists, else None
+    after marking this submit. Also opportunistically evicts stale keys."""
+    now = time.time()
+    # Cheap opportunistic GC — evict anything older than 5 minutes.
+    for k, (ts, _jid) in list(_RECENT_SUBMITS.items()):
+        if now - ts > 300:
+            _RECENT_SUBMITS.pop(k, None)
+    fp = _dedupe_fingerprint(actor, prompt, duration, resolution)
+    existing = _RECENT_SUBMITS.get(fp)
+    if existing and (now - existing[0]) < _DEDUPE_WINDOW_SEC:
+        return existing[1]
+    _RECENT_SUBMITS[fp] = (now, job_id)
+    return None
+
 
 def fal_headers() -> dict:
     # fal.ai accepts both `Key <token>` and `Bearer <token>`. Bearer is friendlier
@@ -4121,6 +4159,35 @@ async def generate(
     if resolution not in ("768P", "1080P"):
         raise HTTPException(400, "resolution must be 768P or 1080P")
 
+    # ── Duplicate-submit guard ─────────────────────────────────────
+    # If the same (user, prompt, duration, resolution) tuple was submitted
+    # in the last 30s, return the existing job_id with 200 instead of
+    # queuing a duplicate render. Prevents the spam-click runaway that
+    # produced 24 identical renders for lloydjarrow@gmail.com on 2026-09-02.
+    _dedupe_actor = user_id or user_email or (request.client.host if request.client else "anon")
+    _existing_job_id = _check_and_mark_submit(
+        _dedupe_actor, prompt, duration, resolution, job_id="pending"
+    )
+    if _existing_job_id:
+        # "pending" means the first request is still mid-flight (we haven't
+        # allocated a job_id yet). Either way this is a duplicate: block it.
+        print(
+            f"[dedupe] dropping duplicate submit from {_dedupe_actor} "
+            f"({duration}s {resolution}); existing job {_existing_job_id}"
+        )
+        if _existing_job_id == "pending":
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "duplicate_submit",
+                    "message": (
+                        "That same render was just submitted \u2014 hang on a "
+                        "moment while it finishes queuing."
+                    ),
+                },
+            )
+        return {"job_id": _existing_job_id, "duplicate": True}
+
     # ── Reference-image gate ────────────────────────────────────────
     # Every render must have a reference image. Users either upload one or
     # pick one from the /api/plan candidate grid. Auto-resolve via DDG /
@@ -4184,6 +4251,15 @@ async def generate(
 
     scenes_plan = plan_scenes(duration)
     job_id = uuid.uuid4().hex[:12]
+    # Overwrite the dedupe fingerprint (currently marked "pending") with
+    # the real job_id so a follow-up duplicate submit gets that job back
+    # instead of a bare "pending".
+    try:
+        _RECENT_SUBMITS[_dedupe_fingerprint(_dedupe_actor, prompt, duration, resolution)] = (
+            time.time(), job_id,
+        )
+    except Exception as _e:
+        print(f"[dedupe] failed to record job_id {job_id}: {_e}")
 
     # Pre-picked scenes from /api/plan approval step. Must be a JSON list of
     # strings whose length matches scenes_plan or we reject and force the
