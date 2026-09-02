@@ -1866,6 +1866,26 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
         # TTS it via ElevenLabs, and ffmpeg swaps the audio track. Any
         # failure at any step just leaves the MiniMax audio in place —
         # the scene still ships.
+        # Stamp a per-scene diagnostic trail onto the job dict so we can
+        # read it via /api/_debug/last_jobs without Railway log access.
+        def _trace(step: str, ok: bool, detail: str = "") -> None:
+            j = JOBS.get(job_id)
+            if not j:
+                return
+            j.setdefault("voice_trace", []).append({
+                "scene": idx, "step": step, "ok": bool(ok), "detail": detail[:200],
+            })
+
+        gate = {
+            "ok": bool(ok),
+            "scene_exists": scene_out.exists(),
+            "voice_id": bool(figure_voice_id),
+            "display_name": bool(figure_display_name),
+            "style_hint": bool(figure_style_hint),
+        }
+        _trace("gate", all(gate.values()), str(gate))
+        print(f"[voice] job {job_id} scene {idx} gate: {gate}")
+
         if (
             ok
             and scene_out.exists()
@@ -1873,26 +1893,55 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
             and figure_display_name
             and figure_style_hint
         ):
-            line = _grok_scene_dialogue(
-                figure_display_name,
-                figure_style_hint,
-                scene_prompt,
-                dur,
-            )
+            try:
+                line = _grok_scene_dialogue(
+                    figure_display_name,
+                    figure_style_hint,
+                    scene_prompt,
+                    dur,
+                )
+            except Exception as e:  # noqa: BLE001
+                line = None
+                _trace("grok_dialogue", False, f"crash: {type(e).__name__}: {e}")
+                print(f"[voice] job {job_id} scene {idx}: Grok crashed: {e}")
+            else:
+                _trace("grok_dialogue", bool(line), (line or "")[:120])
+
             if line:
                 voice_out = scene_dir / f"scene_{idx:02d}_voice.mp3"
-                if _tts_elevenlabs(line, figure_voice_id, voice_out):
-                    if _mux_voice_over_video(scene_out, voice_out):
+                try:
+                    tts_ok = _tts_elevenlabs(line, figure_voice_id, voice_out)
+                except Exception as e:  # noqa: BLE001
+                    tts_ok = False
+                    _trace("tts", False, f"crash: {type(e).__name__}: {e}")
+                    print(f"[voice] job {job_id} scene {idx}: TTS crashed: {e}")
+                else:
+                    _trace("tts", tts_ok,
+                           f"exists={voice_out.exists()} size={voice_out.stat().st_size if voice_out.exists() else 0}")
+
+                if tts_ok:
+                    try:
+                        mux_ok = _mux_voice_over_video(scene_out, voice_out)
+                    except Exception as e:  # noqa: BLE001
+                        mux_ok = False
+                        _trace("mux", False, f"crash: {type(e).__name__}: {e}")
+                        print(f"[voice] job {job_id} scene {idx}: mux crashed: {e}")
+                    else:
+                        _trace("mux", mux_ok, "")
+                    if mux_ok:
                         print(
                             f"[voice] job {job_id} scene {idx}: swapped in cloned "
                             f"voice ({len(line)} chars): {line[:80]!r}"
                         )
-                        # Now realign the mouth to match the new audio. Uses
-                        # sync-labs/lipsync-2 via fal (~10-30s per scene).
-                        # On failure we keep the voice-swapped video with
-                        # mismatched lips — audio still sounds like Scott,
-                        # just lips will be off.
-                        if _fal_lipsync(scene_out, voice_out, job_id, idx):
+                        try:
+                            lip_ok = _fal_lipsync(scene_out, voice_out, job_id, idx)
+                        except Exception as e:  # noqa: BLE001
+                            lip_ok = False
+                            _trace("lipsync", False, f"crash: {type(e).__name__}: {e}")
+                            print(f"[voice] job {job_id} scene {idx}: lipsync crashed: {e}")
+                        else:
+                            _trace("lipsync", lip_ok, "")
+                        if lip_ok:
                             print(f"[voice] job {job_id} scene {idx}: lip-sync pass succeeded")
                         else:
                             print(f"[voice] job {job_id} scene {idx}: lip-sync pass failed, kept unsynced video")
@@ -2931,6 +2980,32 @@ def library_probe(user_id: str):
         out["error"] = f"{type(e).__name__}: {e}"
         out["tb"] = traceback.format_exc()[-1500:]
     return out
+
+
+@app.get("/api/_debug/last_voice_jobs")
+def last_voice_jobs(n: int = 5):
+    """Return the last N jobs that had voice-swap enabled, with their
+    per-scene voice_trace so we can diagnose where the chain dropped
+    without needing Railway log access."""
+    rows = []
+    for jid, j in reversed(list(JOBS.items())):
+        if not isinstance(j, dict):
+            continue
+        if not j.get("voice_clone_slug") and not j.get("voice_trace"):
+            continue
+        rows.append({
+            "job_id": jid,
+            "created_at": j.get("created_at"),
+            "status": j.get("status"),
+            "prompt": (j.get("prompt") or "")[:120],
+            "voice_clone_slug": j.get("voice_clone_slug"),
+            "scene_total": j.get("scene_total"),
+            "scene_done": j.get("scene_done"),
+            "voice_trace": j.get("voice_trace", []),
+        })
+        if len(rows) >= max(1, min(n, 20)):
+            break
+    return {"count": len(rows), "jobs": rows}
 
 
 @app.get("/api/_debug/figure_probe")
