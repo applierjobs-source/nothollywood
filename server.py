@@ -2084,8 +2084,25 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
         if not keyframe_refs:
             keyframe_refs = [current_ref]
 
+        # For Scott Adams: use the same strict "preserve reference exactly"
+        # prompt for scene 0 as we do for scenes 1+. Otherwise nano-banana
+        # reinterprets s0_prompt with its own composition and every scene
+        # starts from a slightly different room/angle.
+        if fig_slug == "scott-adams":
+            s0_kf_prompt = (
+                "Recreate this exact reference frame with the SAME "
+                "person, SAME wardrobe (plain black t-shirt), SAME "
+                "black rectangular eyeglasses, SAME wood-paneled office "
+                "background, SAME boom microphone in the foreground, "
+                "SAME camera angle (webcam-style medium close-up), "
+                "SAME lighting. Only change the subject's mouth/facial "
+                "expression to appear mid-sentence. Photorealistic, "
+                "NOT animated, NOT cartoon."
+            )
+        else:
+            s0_kf_prompt = s0_prompt
         keyframe_url, kf_err = generate_scene0_keyframe(
-            scene_prompt=s0_prompt,
+            scene_prompt=s0_kf_prompt,
             reference_urls=keyframe_refs,
             job_id=job_id,
         )
@@ -2127,7 +2144,41 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
         # Public-figure anchor: rebuild the scene N opening frame from the
         # real photo + scene prompt instead of chaining. Scene 0 already got
         # a keyframe above so skip re-blending it (would double-cost).
-        if figure_anchor_ref and i > 0:
+        #
+        # For public figures we deliberately IGNORE the expanded scene
+        # prompt (Grok tends to invent new camera angles, room details, and
+        # wardrobe variations that break continuity). Instead we hand nano-
+        # banana a strict "preserve this reference exactly, only change the
+        # subject's expression" instruction. The action still comes through
+        # via the MiniMax scene prompt, which is what drives motion — the
+        # keyframe just guarantees identical wardrobe/framing/background
+        # every scene.
+        if figure_anchor_ref and i > 0 and fig_slug == "scott-adams":
+            kf_url, kf_err = generate_scene0_keyframe(
+                scene_prompt=(
+                    "Recreate this exact reference frame with the SAME "
+                    "person, SAME wardrobe (plain black t-shirt), SAME "
+                    "black rectangular eyeglasses, SAME wood-paneled office "
+                    "background, SAME boom microphone in the foreground, "
+                    "SAME camera angle (webcam-style medium close-up), "
+                    "SAME lighting. Only change the subject's mouth/facial "
+                    "expression to appear mid-sentence. Photorealistic, "
+                    "NOT animated, NOT cartoon."
+                ),
+                reference_urls=[figure_anchor_ref],
+                job_id=job_id,
+            )
+            if kf_url:
+                current_ref = kf_url
+                current_ref_mode = "first_frame"
+                print(f"[render {job_id}] scene {i} re-anchored to figure keyframe (strict preserve): {kf_url}")
+            else:
+                print(
+                    f"[render {job_id}] scene {i} keyframe re-anchor failed ({kf_err}); "
+                    f"falling back to previous scene's last frame"
+                )
+        elif figure_anchor_ref and i > 0:
+            # Non-Scott public figures: use the older generic re-anchor.
             scene_prompt_i = (
                 scene_prompts_expanded[i]
                 if i < len(scene_prompts_expanded)
@@ -2141,12 +2192,6 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
             if kf_url:
                 current_ref = kf_url
                 current_ref_mode = "first_frame"
-                print(f"[render {job_id}] scene {i} re-anchored to figure keyframe: {kf_url}")
-            else:
-                print(
-                    f"[render {job_id}] scene {i} keyframe re-anchor failed ({kf_err}); "
-                    f"falling back to previous scene's last frame"
-                )
 
         try:
             idx, ok, err, out_path = _render_scene(i, dur, current_ref, ref_mode=current_ref_mode)
