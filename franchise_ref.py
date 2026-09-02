@@ -921,26 +921,39 @@ _PUBLIC_FIGURE_ALIASES: dict[str, str] = {
     "scottadams": "scott-adams",
     "realscottadams": "scott-adams",
     "dilbert creator": "scott-adams",
+    # Donald Trump — baked-in official 2025 portrait. Aliases cover the
+    # common ways users refer to him so 'Trump running The Office' anchors
+    # to the real face instead of falling through to a generic cast frame.
+    "donald trump": "donald-trump",
+    "president trump": "donald-trump",
+    "trump": "donald-trump",
+    "the donald": "donald-trump",
+    "realdonaldtrump": "donald-trump",
 }
 
 
 def _match_public_figure(prompt: str) -> Optional[tuple[str, str]]:
     """Return (canonical_name, slug) if the prompt names a curated public
-    figure. Case-insensitive substring match on word boundaries.
+    figure. Case-insensitive word-boundary match.
 
     Fast, deterministic, no LLM call. Runs before the show extractor so
     a prompt like 'Scott Adams reviews his coffee' auto-attaches the
     scott-adams.png reference frame even though Scott Adams isn't a TV
     show. Never raises.
+
+    Uses regex word-boundaries so 'trump' matches 'Trump walks in' but
+    NOT 'trumpet' or 'trumpler'.
     """
     if not prompt:
         return None
+    import re as _re
     lowered = prompt.lower()
-    # Longest alias first so 'scott adams' beats 'scott' if we ever add 'scott'.
+    # Longest alias first so 'donald trump' beats 'trump'.
     for alias in sorted(_PUBLIC_FIGURE_ALIASES.keys(), key=len, reverse=True):
-        if alias in lowered:
+        # \b before/after handles 'Trump.' 'Trump,' 'Trump!' and Trump\n.
+        # For multi-word aliases like 'donald trump' \b still fires at each end.
+        if _re.search(rf"\b{_re.escape(alias)}\b", lowered):
             slug = _PUBLIC_FIGURE_ALIASES[alias]
-            # Canonical name = slug with first letter of each dash-segment upper.
             canonical = " ".join(w.capitalize() for w in slug.split("-"))
             return (canonical, slug)
     return None

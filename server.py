@@ -212,7 +212,12 @@ FRANCHISE_REFS.mkdir(exist_ok=True)
 #   - hand-picked baseline images committed in the repo (seinfeld.png,
 #     the-office.png). We identify these by name, since git-tracking info
 #     isn't reliable at runtime on Railway.
-_BAKED_IN_REFS = {"seinfeld.png", "the-office.png", "scott-adams.png"}
+_BAKED_IN_REFS = {
+    "seinfeld.png",
+    "the-office.png",
+    "scott-adams.png",
+    "donald-trump.jpg",
+}
 try:
     _pruned = 0
     for _p in FRANCHISE_REFS.glob("*"):

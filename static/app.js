@@ -559,10 +559,35 @@ if (el.previewRefUploadBtn && el.previewRefFile) {
 let pendingPlan = null;
 let pendingUpload = null; // File object if user uploaded a reference
 
+// Flash an inline error under the submit button so the user never thinks
+// the click did nothing. Auto-clears after 4s or on next submit attempt.
+function showSubmitError(msg) {
+  console.warn("[submit]", msg);
+  let box = document.getElementById("submitError");
+  if (!box) {
+    box = document.createElement("p");
+    box.id = "submitError";
+    box.style.cssText = "margin:10px 0 0;color:#ff6b6b;font-size:13px;font-weight:500;";
+    el.submitBtn.parentNode.insertBefore(box, el.submitBtn.nextSibling);
+  }
+  box.textContent = msg;
+  box.style.display = "block";
+  clearTimeout(showSubmitError._t);
+  showSubmitError._t = setTimeout(() => { box.style.display = "none"; }, 4000);
+}
+
 el.renderForm.addEventListener("submit", async (e) => {
   e.preventDefault();
+  // Clear any prior error banner.
+  const existingErr = document.getElementById("submitError");
+  if (existingErr) existingErr.style.display = "none";
+
   const prompt = el.prompt.value.trim();
-  if (!prompt) return;
+  if (!prompt) {
+    showSubmitError("Add a prompt describing what you want to make.");
+    el.prompt.focus();
+    return;
+  }
 
   const duration = currentDuration();
   const scenes = sceneCount(duration);
@@ -619,7 +644,7 @@ el.renderForm.addEventListener("submit", async (e) => {
     closeModal(el.composerModal);
     openPreview(pendingPlan);
   } catch (err) {
-    alert("Preview failed: " + (err.message || err));
+    showSubmitError("Preview failed: " + (err.message || err));
   } finally {
     el.submitBtn.disabled = false;
     el.submitBtn.querySelector(".btn-label").textContent = origLabel;
