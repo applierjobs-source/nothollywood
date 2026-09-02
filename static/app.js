@@ -624,7 +624,17 @@ el.renderForm.addEventListener("submit", async (e) => {
   pendingUpload = null;
   el.submitBtn.disabled = true;
   const origLabel = el.submitBtn.querySelector(".btn-label").textContent;
-  el.submitBtn.querySelector(".btn-label").textContent = "Building preview…";
+  el.submitBtn.querySelector(".btn-label").textContent = "Generating storyboard…";
+  // Ask (once, non-blocking) for browser-notification permission so we
+  // can ping the user when the storyboard is ready if they tabbed away.
+  if ("Notification" in window && Notification.permission === "default") {
+    try { Notification.requestPermission(); } catch (_) { /* fine */ }
+  }
+  // Show a full-composer overlay so a user who tabs away and comes back
+  // sees an unmistakable "still working" state instead of an idle-looking
+  // form. Testers reported missing the storyboard popup after switching
+  // windows.
+  showStoryboardLoading();
 
   try {
     const fd = new FormData();
@@ -641,15 +651,80 @@ el.renderForm.addEventListener("submit", async (e) => {
     pendingPlan._prompt = prompt;
     pendingPlan._duration = duration;
     pendingPlan._resolution = document.querySelector('input[name="resolution"]:checked').value;
+    hideStoryboardLoading();
     closeModal(el.composerModal);
     openPreview(pendingPlan);
+    // Ping user with a browser notification if the tab isn't focused --
+    // testers reported switching windows during the ~10-30s storyboard
+    // wait and missing the popup. Permission is requested inline so a
+    // no-op if the user hasn't granted it yet.
+    if (typeof document !== "undefined" && document.hidden && "Notification" in window) {
+      try {
+        if (Notification.permission === "granted") {
+          new Notification("Storyboard ready", {
+            body: "Your Not Hollywood storyboard is ready for approval.",
+            icon: "/favicon.png",
+            tag: "nh-storyboard-ready",
+          });
+        }
+      } catch (_) { /* Notification API is best-effort */ }
+    }
   } catch (err) {
-    showSubmitError("Preview failed: " + (err.message || err));
+    hideStoryboardLoading();
+    showSubmitError("Storyboard generation failed: " + (err.message || err));
   } finally {
     el.submitBtn.disabled = false;
     el.submitBtn.querySelector(".btn-label").textContent = origLabel;
   }
 });
+
+// Full-composer "Generating storyboard…" overlay. Rendered lazily so we
+// only touch the DOM when the user actually hits Send. Auto-clears when
+// the preview modal opens or an error banner shows.
+function showStoryboardLoading() {
+  let ov = document.getElementById("storyboardLoadingOverlay");
+  if (!ov) {
+    ov = document.createElement("div");
+    ov.id = "storyboardLoadingOverlay";
+    ov.style.cssText = [
+      "position:absolute",
+      "inset:0",
+      "background:rgba(10,10,12,0.94)",
+      "display:flex",
+      "flex-direction:column",
+      "align-items:center",
+      "justify-content:center",
+      "gap:20px",
+      "z-index:5",
+      "border-radius:inherit",
+      "backdrop-filter:blur(6px)",
+      "-webkit-backdrop-filter:blur(6px)",
+    ].join(";");
+    ov.innerHTML = `
+      <div style="width:56px;height:56px;border:3px solid rgba(255,255,255,0.15);border-top-color:#ff4d4d;border-radius:50%;animation:sbSpin 0.9s linear infinite;"></div>
+      <div style="text-align:center;max-width:360px;padding:0 24px;">
+        <div style="font-size:18px;font-weight:600;color:#fff;margin-bottom:8px;">Generating storyboard…</div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.65);line-height:1.5;">
+          We're planning scenes and casting characters. This usually takes 10 to 30 seconds. Stay on this tab and the storyboard will pop up for your approval.
+        </div>
+      </div>
+      <style>@keyframes sbSpin{to{transform:rotate(360deg)}}</style>
+    `;
+    // Attach inside the composer card so it covers only the form, not the
+    // whole page (keeps modal chrome intact and lets us layer above the form).
+    const composerCard = el.composerModal.querySelector(".modal-card") || el.composerModal;
+    if (getComputedStyle(composerCard).position === "static") {
+      composerCard.style.position = "relative";
+    }
+    composerCard.appendChild(ov);
+  }
+  ov.style.display = "flex";
+}
+
+function hideStoryboardLoading() {
+  const ov = document.getElementById("storyboardLoadingOverlay");
+  if (ov) ov.style.display = "none";
+}
 
 function openPreview(plan) {
   // Show modal in loading state briefly, then swap to body when populated.
