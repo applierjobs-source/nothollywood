@@ -217,6 +217,8 @@ _BAKED_IN_REFS = {
     "the-office.png",
     "scott-adams.png",
     "donald-trump.jpg",
+    "vladimir-putin.jpg",
+    "xi-jinping.jpg",
 }
 try:
     _pruned = 0

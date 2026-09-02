@@ -929,6 +929,13 @@ _PUBLIC_FIGURE_ALIASES: dict[str, str] = {
     "trump": "donald-trump",
     "the donald": "donald-trump",
     "realdonaldtrump": "donald-trump",
+    # Vladimir Putin — baked-in official portrait.
+    "vladimir putin": "vladimir-putin",
+    "president putin": "vladimir-putin",
+    "putin": "vladimir-putin",
+    # Xi Jinping — baked-in official portrait.
+    "xi jinping": "xi-jinping",
+    "president xi": "xi-jinping",
 }
 
 
