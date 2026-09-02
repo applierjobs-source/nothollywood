@@ -911,6 +911,9 @@ def _grok_scene_dialogue(
         return None
 
 
+_TTS_LAST_ERROR: dict = {}  # for /api/_debug/last_voice_jobs to surface
+
+
 def _tts_elevenlabs(text: str, voice_id: str, out_path: Path) -> bool:
     """Synthesize `text` with the cloned voice and write MP3 to out_path.
 
@@ -918,8 +921,10 @@ def _tts_elevenlabs(text: str, voice_id: str, out_path: Path) -> bool:
     to MiniMax's original audio track).
     """
     if not ELEVENLABS_API_KEY:
+        _TTS_LAST_ERROR.update({"kind": "no_key"})
         return False
     if not text or not text.strip():
+        _TTS_LAST_ERROR.update({"kind": "empty_text"})
         return False
     try:
         r = requests.post(
@@ -943,11 +948,31 @@ def _tts_elevenlabs(text: str, voice_id: str, out_path: Path) -> bool:
             timeout=60,
         )
         if not r.ok:
+            _TTS_LAST_ERROR.update({
+                "kind": "http_error",
+                "status": r.status_code,
+                "body": r.text[:400],
+                "voice_id": voice_id,
+            })
             print(f"[tts] ElevenLabs error {r.status_code}: {r.text[:200]}")
             return False
         out_path.write_bytes(r.content)
-        return out_path.stat().st_size > 1024
+        size = out_path.stat().st_size
+        if size <= 1024:
+            _TTS_LAST_ERROR.update({
+                "kind": "tiny_response",
+                "size": size,
+                "content_type": r.headers.get("content-type"),
+                "body": r.text[:400] if size < 8000 else "(binary omitted)",
+            })
+            return False
+        _TTS_LAST_ERROR.clear()
+        return True
     except Exception as e:  # noqa: BLE001
+        _TTS_LAST_ERROR.update({
+            "kind": "exception",
+            "exc": f"{type(e).__name__}: {e}",
+        })
         print(f"[tts] ElevenLabs crashed: {type(e).__name__}: {e}")
         return False
 
@@ -2980,6 +3005,13 @@ def library_probe(user_id: str):
         out["error"] = f"{type(e).__name__}: {e}"
         out["tb"] = traceback.format_exc()[-1500:]
     return out
+
+
+@app.get("/api/_debug/tts_last_error")
+def tts_last_error():
+    """Return the details of the most recent ElevenLabs TTS failure so we
+    can see the actual HTTP status/body without Railway log access."""
+    return dict(_TTS_LAST_ERROR) or {"kind": "none"}
 
 
 @app.get("/api/_debug/last_voice_jobs")
