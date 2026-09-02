@@ -3001,6 +3001,72 @@ def _proxy_wrap(url: str) -> str:
     return f"/api/proxy_ref?url={quote(url, safe='')}"
 
 
+@app.get("/api/_debug/signups")
+def debug_signups(hours: int = 24):
+    """Unauthed: list users created in the last N hours (default 24).
+
+    Reads auth.users via the service role. Returns id, email, created_at,
+    and their current credit balance so we can see who signed up AND
+    whether they got the signup bonus.
+    """
+    if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        return {"error": "supabase service role not configured"}
+    try:
+        # auth.users is exposed via GoTrue admin, not PostgREST
+        r = requests.get(
+            f"{SUPABASE_URL}/auth/v1/admin/users",
+            params={"per_page": 100},
+            headers={
+                "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+            },
+            timeout=10,
+        )
+        if not r.ok:
+            return {"error": f"auth admin fetch failed: {r.status_code} {r.text[:200]}"}
+        users = r.json().get("users", [])
+        cutoff = time.time() - hours * 3600
+        recent = []
+        for u in users:
+            created = u.get("created_at", "")
+            try:
+                from datetime import datetime
+                ts = datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                ts = 0
+            if ts >= cutoff:
+                # Look up their credit balance
+                cr = requests.get(
+                    f"{SUPABASE_URL}/rest/v1/user_credits",
+                    params={"user_id": f"eq.{u['id']}", "select": "balance"},
+                    headers={
+                        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                    },
+                    timeout=5,
+                )
+                bal = None
+                if cr.ok:
+                    rows = cr.json()
+                    bal = rows[0]["balance"] if rows else None
+                recent.append({
+                    "id": u["id"],
+                    "email": u.get("email", ""),
+                    "created_at": created,
+                    "provider": (u.get("app_metadata") or {}).get("provider", ""),
+                    "balance": bal,
+                })
+        recent.sort(key=lambda x: x["created_at"], reverse=True)
+        return {
+            "hours": hours,
+            "count": len(recent),
+            "total_users": len(users),
+            "users": recent,
+        }
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
 @app.get("/api/_debug/failed_jobs")
 def failed_jobs_probe(limit: int = 10):
     """Dump recent failed jobs from the in-memory JOBS dict so we can diagnose
