@@ -1822,11 +1822,14 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
         if fig_slug == "scott-adams":
             scene_prompt = (
                 "PHOTOREALISTIC LIVE-ACTION VIDEO of the real Scott Adams "
-                "(60-year-old bald man, wire-frame glasses, thin build, "
-                "navy button-down shirt). Documentary-style handheld camera, "
-                "natural skin texture, natural indoor podcast-studio lighting, "
-                "HD video. This is NOT animation, NOT a cartoon, NOT illustrated, "
-                "NOT stylized — real cinematography of a real human being. "
+                "(60-year-old bald man, thin build, black rectangular "
+                "eyeglasses, plain black t-shirt). Filmed in his home "
+                "podcast studio: wood-paneled cabinets behind him, warm "
+                "desk lamp, professional microphone on a boom arm in the "
+                "foreground, webcam-style medium close-up shot. Natural "
+                "skin texture, natural indoor lighting, HD video. This is "
+                "NOT animation, NOT a cartoon, NOT illustrated, NOT "
+                "stylized — real cinematography of a real human being. "
                 f"Scene action: {scene_prompt}"
             )
 

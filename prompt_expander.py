@@ -741,10 +741,12 @@ def _known_character_hint(prompt: str) -> str | None:
         # in the negative direction consistently blocks that drift.
         "scott adams": "Scott Adams — real person, photorealistic live-action "
         "video, documentary style, natural skin texture, natural lighting, "
-        "real 60-year-old bald man with wire-frame glasses and navy button-down "
-        "shirt in his home podcast studio. NOT animated, NOT cartoon, NOT "
-        "illustrated, NOT stylized — real cinematography of a real human being. "
-        "Handheld or locked-off camera, shallow depth of field, HD video.",
+        "real 60-year-old bald man, thin build, black rectangular eyeglasses, "
+        "plain black t-shirt, filmed in his home podcast studio with wood-paneled "
+        "cabinets behind him and a professional boom-arm microphone in the "
+        "foreground. NOT animated, NOT cartoon, NOT illustrated, NOT stylized — "
+        "real cinematography of a real human being. Webcam-style medium close-up, "
+        "shallow depth of field, HD video.",
     }
     for kw, desc in catalogs.items():
         if kw in p:
