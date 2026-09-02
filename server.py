@@ -1066,7 +1066,16 @@ def _fal_lipsync(video_path: Path, voice_path: Path, job_id: str, idx: int) -> b
             json={
                 "video_url": video_url,
                 "audio_url": audio_url,
-                "model": "lipsync-2",
+                # lipsync-2-pro is ~1.67x cost of lipsync-2 but the sync
+                # quality on talking-head footage (Scott Adams podcast) is
+                # noticeably tighter — worth it for public figures.
+                "model": "lipsync-2-pro",
+                # 'remap' aligns the video timing to the audio when the two
+                # durations differ, instead of the default 'cut_off' which
+                # just truncates. Our voice track is padded/trimmed to the
+                # scene length upstream but 'remap' still lets the model
+                # nudge mouth timing rather than losing sync at the end.
+                "sync_mode": "remap",
             },
             timeout=30,
         )
