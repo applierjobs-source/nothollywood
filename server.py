@@ -2428,10 +2428,18 @@ async def create_checkout_session(request: Request):
         print(f"[stripe] JWT verify failed (proceeding anon): {e}")
 
     # Build the Stripe API form payload (application/x-www-form-urlencoded)
+    #
+    # `managed_payments[enabled]=false`: Stripe recently enabled Managed
+    # Payments by default on new accounts, which requires every product to
+    # carry a product_tax_code. Our packs are digital credits (no tax), so
+    # we opt out of Managed Payments to keep checkouts working with the
+    # simple line-items flow. To turn tax handling back on later, remove
+    # this flag and set the product_tax_code in the Stripe dashboard.
     form = {
         "mode": "payment",
         "line_items[0][price]": pack["price_id"],
         "line_items[0][quantity]": "1",
+        "managed_payments[enabled]": "false",
         "success_url": success_url + ("&" if "?" in success_url else "?") + "session_id={CHECKOUT_SESSION_ID}",
         "cancel_url": cancel_url,
         "metadata[pack]": pack_id,
