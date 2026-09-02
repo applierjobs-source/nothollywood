@@ -2549,6 +2549,63 @@ def credit_cost_for(duration: int, resolution: str) -> int:
     return max(1, int(duration) * per_sec)
 
 
+# Signup bonus: 3 minutes of 768P video = 180 credits. Granted once on
+# the very first time a signed-in user hits /api/credits or /api/generate.
+# We detect "new user" as "no row exists in user_credits yet" — once the
+# row exists (even at balance 0 after spending down), we don't re-grant.
+SIGNUP_BONUS_CREDITS = 180
+
+
+def _ensure_signup_bonus(user_id: str) -> int | None:
+    """If this user has no user_credits row yet, insert one with the
+    signup bonus and return the new balance. If they already have a row,
+    returns None (don't re-grant). Any failure returns None (safe —
+    caller falls back to normal read).
+    """
+    if not user_id or not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        return None
+    try:
+        read = requests.get(
+            f"{SUPABASE_URL}/rest/v1/user_credits",
+            params={"user_id": f"eq.{user_id}", "select": "balance"},
+            headers={
+                "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+            },
+            timeout=10,
+        )
+        if not read.ok:
+            print(f"[signup_bonus] read failed for {user_id}: {read.status_code}")
+            return None
+        rows = read.json()
+        if rows:
+            # Existing user — do NOT re-grant.
+            return None
+        # First touch: insert the bonus row. Use `on_conflict=user_id` and
+        # `resolution=merge-duplicates` so that if two /api/credits calls
+        # race, the second one is a no-op instead of erroring.
+        ins = requests.post(
+            f"{SUPABASE_URL}/rest/v1/user_credits",
+            params={"on_conflict": "user_id"},
+            headers={
+                "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "resolution=ignore-duplicates,return=representation",
+            },
+            json={"user_id": user_id, "balance": SIGNUP_BONUS_CREDITS},
+            timeout=10,
+        )
+        if not ins.ok:
+            print(f"[signup_bonus] insert failed for {user_id}: {ins.status_code} {ins.text[:200]}")
+            return None
+        print(f"[signup_bonus] granted {SIGNUP_BONUS_CREDITS} credits to new user {user_id}")
+        return SIGNUP_BONUS_CREDITS
+    except Exception as e:  # noqa: BLE001
+        print(f"[signup_bonus] crashed for {user_id}: {e}")
+        return None
+
+
 def _adjust_credits_via_supabase(user_id: str, delta: int) -> tuple[bool, str, int | None]:
     """Atomically adjust `user_credits.balance` by `delta` (positive = grant,
     negative = debit). Fails without changing balance when `delta < 0` and the
@@ -2812,6 +2869,12 @@ def get_credits(request: Request):
         return {"balance": UNLIMITED_BALANCE, "unlimited": True}
     if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
         return {"balance": 0, "stub": True}
+    # Signup bonus: first-touch users get SIGNUP_BONUS_CREDITS (3 min of
+    # 768P). Returns the granted balance if this was the first touch, or
+    # None if the row already existed (normal read path below handles it).
+    bonus_balance = _ensure_signup_bonus(user_id)
+    if bonus_balance is not None:
+        return {"balance": bonus_balance, "signup_bonus": True}
     r = requests.get(
         f"{SUPABASE_URL}/rest/v1/user_credits",
         params={"user_id": f"eq.{user_id}", "select": "balance"},
@@ -3667,6 +3730,10 @@ async def generate(
     if _is_unlimited(user_id, user_email):
         print(f"[credits] unlimited-account render for {user_id or user_email} (skip debit)")
     elif user_id and SUPABASE_SERVICE_ROLE_KEY:
+        # Signup bonus safety net: if the user is hitting /api/generate
+        # before /api/credits ever ran (e.g. deeplink from a promo), give
+        # them the bonus row now so their first render just works.
+        _ensure_signup_bonus(user_id)
         ok, msg, new_balance = _adjust_credits_via_supabase(user_id, -render_cost)
         if not ok:
             if "insufficient credits" in msg:
