@@ -117,6 +117,26 @@ RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 EMAIL_FROM = os.environ.get("EMAIL_FROM", "Not Hollywood <onboarding@resend.dev>")
 SITE_URL = os.environ.get("SITE_URL", "https://www.nothollywood.ai").rstrip("/")
 
+# ────────────────────────────────────────────────────────────────────
+# ElevenLabs voice cloning. When a public figure is detected (via
+# franchise_ref._match_public_figure) AND we have a voice_id mapped for
+# that figure, we override MiniMax H3's synthesized narrator with the
+# cloned voice: Grok writes 1-2 sentences of in-character dialogue per
+# scene, ElevenLabs TTS turns it into audio, ffmpeg swaps it into the
+# scene's video. Falls back gracefully — if ELEVENLABS_API_KEY is unset,
+# Grok fails, or ffmpeg mux fails, the scene ships with MiniMax audio.
+# ────────────────────────────────────────────────────────────────────
+ELEVENLABS_API_KEY = (
+    os.environ.get("ELEVENLABS_API_KEY", "")
+    or os.environ.get("CUSTOM_CRED_API_ELEVENLABS_IO_TOKEN", "")
+)
+ELEVENLABS_BASE = "https://api.elevenlabs.io"
+# figure slug (from franchise_ref._PUBLIC_FIGURE_ALIASES) -> ElevenLabs voice_id.
+# Add new entries as we clone more public figures.
+_FIGURE_VOICES: dict[str, str] = {
+    "scott-adams": "2FrXmPwNqHH4MuMw0VIu",  # "AI Scott Adams - Jan 26"
+}
+
 PACKS = {
     "starter":     {"price_id": STRIPE_PRICE_STARTER,     "credits": 75,   "dollars": 15},
     "studio":      {"price_id": STRIPE_PRICE_STUDIO,      "credits": 500,  "dollars": 75},
@@ -823,6 +843,295 @@ def _probe_video_audio_durations(path: Path) -> tuple[float, float]:
     return vdur, adur
 
 
+# ────────────────────────────────────────────────────────────────────
+# ElevenLabs voice-clone helpers.
+#
+# Pipeline: MiniMax generates video+narrator audio in one shot; when we
+# have a cloned voice for a detected public figure, we (1) ask Grok to
+# write 1-2 sentences of in-character dialogue for the scene, (2) TTS it
+# with the cloned voice, (3) ffmpeg mux the cloned audio track over the
+# video, stripping MiniMax's original narrator.
+# ────────────────────────────────────────────────────────────────────
+def _grok_scene_dialogue(
+    figure_name: str,
+    figure_style: str,
+    scene_prompt: str,
+    scene_duration_s: int,
+) -> str | None:
+    """Ask Grok to write in-character dialogue that fits the scene.
+
+    Target ~2.6 words/sec of ElevenLabs TTS — empirically about right for
+    natural speech pacing. Returns plain text or None on failure.
+    """
+    if not GROK_API_KEY:
+        return None
+    target_words = max(4, int(scene_duration_s * 2.6))
+    # Small headroom — shorter is fine (ffmpeg pads with silence), longer
+    # gets truncated by MiniMax's video length. Ask for the sweet spot.
+    sys = (
+        f"You write short spoken lines for a video of {figure_name}. "
+        f"{figure_style} "
+        f"Write ONLY what {figure_name} says aloud in this scene — no "
+        f"stage directions, no narration, no quote marks, no attribution. "
+        f"Match natural TTS pacing: aim for around {target_words} words "
+        f"total so it fits inside a {scene_duration_s}-second clip. Keep "
+        f"it plain prose — no ellipses that TTS will pause on awkwardly."
+    )
+    user_msg = f"Scene description:\n{scene_prompt.strip()}\n\nWrite the spoken line(s):"
+    try:
+        r = requests.post(
+            f"{GROK_BASE}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROK_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "grok-4-fast-non-reasoning",
+                "messages": [
+                    {"role": "system", "content": sys},
+                    {"role": "user", "content": user_msg},
+                ],
+                "temperature": 0.7,
+                "max_tokens": 400,
+            },
+            timeout=30,
+        )
+        if not r.ok:
+            print(f"[dialogue] Grok error {r.status_code}: {r.text[:200]}")
+            return None
+        text = r.json()["choices"][0]["message"]["content"].strip()
+        # Strip stray quote marks / brackets Grok sometimes wraps around.
+        text = text.strip('"\u201c\u201d\u2018\u2019\'`[]() ').strip()
+        # Nuke leading "He says:" / "Scott:" style attributions if the model
+        # ignored the system prompt.
+        text = re.sub(r"^[A-Z][A-Za-z .'-]{0,40}:\s*", "", text)
+        return text or None
+    except Exception as e:  # noqa: BLE001
+        print(f"[dialogue] Grok crashed: {type(e).__name__}: {e}")
+        return None
+
+
+def _tts_elevenlabs(text: str, voice_id: str, out_path: Path) -> bool:
+    """Synthesize `text` with the cloned voice and write MP3 to out_path.
+
+    Returns True on success, False on any failure (caller should fall back
+    to MiniMax's original audio track).
+    """
+    if not ELEVENLABS_API_KEY:
+        return False
+    if not text or not text.strip():
+        return False
+    try:
+        r = requests.post(
+            f"{ELEVENLABS_BASE}/v1/text-to-speech/{voice_id}",
+            headers={
+                "xi-api-key": ELEVENLABS_API_KEY,
+                "Content-Type": "application/json",
+                "Accept": "audio/mpeg",
+            },
+            json={
+                "text": text,
+                "model_id": "eleven_multilingual_v2",
+                "voice_settings": {
+                    "stability": 0.5,
+                    "similarity_boost": 0.85,
+                    "style": 0.35,
+                    "use_speaker_boost": True,
+                },
+                "output_format": "mp3_44100_128",
+            },
+            timeout=60,
+        )
+        if not r.ok:
+            print(f"[tts] ElevenLabs error {r.status_code}: {r.text[:200]}")
+            return False
+        out_path.write_bytes(r.content)
+        return out_path.stat().st_size > 1024
+    except Exception as e:  # noqa: BLE001
+        print(f"[tts] ElevenLabs crashed: {type(e).__name__}: {e}")
+        return False
+
+
+def _mux_voice_over_video(video_path: Path, voice_path: Path) -> bool:
+    """Replace video's audio track with `voice_path` (fit to video length).
+
+    - Voice shorter than video: pad with silence at the end.
+    - Voice longer than video: truncate to video length.
+    - Writes in place via a tmp file to keep the same output path.
+    Returns True on success, False on failure (caller keeps original file).
+    """
+    tmp_out = video_path.with_suffix(".voiced.mp4")
+    vdur, _ = _probe_video_audio_durations(video_path)
+    if vdur <= 0:
+        print(f"[mux] cannot probe video duration for {video_path.name}")
+        return False
+    try:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(video_path),
+            "-i", str(voice_path),
+            # Take video from input 0, audio from input 1.
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            # Pad voice with silence if it's shorter than the video, then trim
+            # to exactly video length so the container has synced streams.
+            "-af", f"apad,atrim=duration={vdur:.3f},aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo",
+            # Copy video (fast, no re-encode). Re-encode audio to AAC for mp4.
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "192k",
+            "-shortest",
+            str(tmp_out),
+        ]
+        r = subprocess.run(cmd, capture_output=True, timeout=120)
+        if r.returncode != 0:
+            print(f"[mux] ffmpeg failed: {r.stderr.decode(errors='replace')[:400]}")
+            return False
+        if not tmp_out.exists() or tmp_out.stat().st_size < 1024:
+            print(f"[mux] output missing or tiny: {tmp_out}")
+            return False
+        tmp_out.replace(video_path)
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"[mux] crashed: {type(e).__name__}: {e}")
+        try:
+            if tmp_out.exists():
+                tmp_out.unlink()
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+
+def _fal_lipsync(video_path: Path, voice_path: Path, job_id: str, idx: int) -> bool:
+    """Run video+audio through fal-ai/sync-lipsync/v2 to align lips to voice.
+
+    Overwrites video_path with the lip-synced result on success. Returns
+    False on any failure (caller keeps the pre-lipsync file). Uses the
+    same FAL_KEY the rest of the pipeline uses. Requires PUBLIC_ORIGIN
+    (fal fetches audio_url and video_url as public https).
+    """
+    if not FAL_KEY:
+        print("[lipsync] FAL_KEY unset")
+        return False
+    if not PUBLIC_ORIGIN:
+        print("[lipsync] PUBLIC_ORIGIN unset \u2014 fal cannot fetch our files")
+        return False
+
+    # Publish both video and audio via /static/frames so fal can fetch them.
+    # We copy rather than symlink so the paths survive across containers.
+    pub_video = FRAMES / f"lipsync_{job_id}_{idx:02d}_in.mp4"
+    pub_audio = FRAMES / f"lipsync_{job_id}_{idx:02d}_in.mp3"
+    try:
+        pub_video.write_bytes(video_path.read_bytes())
+        pub_audio.write_bytes(voice_path.read_bytes())
+    except Exception as e:  # noqa: BLE001
+        print(f"[lipsync] failed to stage files: {type(e).__name__}: {e}")
+        return False
+
+    video_url = f"{PUBLIC_ORIGIN}/static/frames/{pub_video.name}"
+    audio_url = f"{PUBLIC_ORIGIN}/static/frames/{pub_audio.name}"
+
+    try:
+        # Submit to fal queue.
+        submit = requests.post(
+            f"{FAL_BASE}/fal-ai/sync-lipsync/v2",
+            headers={
+                "Authorization": f"Key {FAL_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "video_url": video_url,
+                "audio_url": audio_url,
+                "model": "lipsync-2",
+            },
+            timeout=30,
+        )
+        if not submit.ok:
+            print(f"[lipsync] submit failed {submit.status_code}: {submit.text[:200]}")
+            return False
+        submit_j = submit.json()
+        req_id = submit_j.get("request_id")
+        status_url = submit_j.get("status_url") or f"{FAL_BASE}/fal-ai/sync-lipsync/v2/requests/{req_id}/status"
+        result_url = submit_j.get("response_url") or f"{FAL_BASE}/fal-ai/sync-lipsync/v2/requests/{req_id}"
+        if not req_id:
+            print(f"[lipsync] no request_id in submit response: {submit_j}")
+            return False
+
+        # Poll to completion (lipsync-2 usually 10-30s for a short clip).
+        deadline = time.time() + 300
+        while time.time() < deadline:
+            time.sleep(3)
+            s = requests.get(
+                status_url,
+                headers={"Authorization": f"Key {FAL_KEY}"},
+                timeout=15,
+            )
+            if not s.ok:
+                continue
+            js = s.json()
+            status = js.get("status")
+            if status == "COMPLETED":
+                break
+            if status in {"FAILED", "ERROR", "CANCELLED"}:
+                print(f"[lipsync] fal reported {status}: {js}")
+                return False
+        else:
+            print("[lipsync] fal timed out after 300s")
+            return False
+
+        # Fetch the result URL.
+        r = requests.get(
+            result_url,
+            headers={"Authorization": f"Key {FAL_KEY}"},
+            timeout=30,
+        )
+        if not r.ok:
+            print(f"[lipsync] result fetch failed {r.status_code}: {r.text[:200]}")
+            return False
+        payload = r.json()
+        out_video_url = None
+        video_field = payload.get("video")
+        if isinstance(video_field, dict):
+            out_video_url = video_field.get("url")
+        elif isinstance(video_field, str):
+            out_video_url = video_field
+        if not out_video_url:
+            print(f"[lipsync] no video URL in result: {payload}")
+            return False
+
+        # Download the lip-synced video and overwrite the scene's mp4.
+        dl = requests.get(out_video_url, timeout=120)
+        if not dl.ok or len(dl.content) < 1024:
+            print(f"[lipsync] download failed: status={dl.status_code} bytes={len(dl.content)}")
+            return False
+        video_path.write_bytes(dl.content)
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"[lipsync] crashed: {type(e).__name__}: {e}")
+        return False
+    finally:
+        # Clean up the staged public files — fal has already fetched them.
+        for p in (pub_video, pub_audio):
+            try:
+                if p.exists():
+                    p.unlink()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+# Short character-voice/style hints per figure. Fed to Grok so dialogue
+# matches the figure's actual speaking cadence. Add entries alongside
+# _FIGURE_VOICES when we clone new public figures.
+_FIGURE_STYLES: dict[str, tuple[str, str]] = {
+    # slug -> (display name, style hint for Grok)
+    "scott-adams": (
+        "Scott Adams",
+        "He speaks in short conversational sentences, punchy and confident, "
+        "often with dry sarcasm. Sometimes drops observations like 'here's what "
+        "you don't know' or 'watch what happens next.' Avoids buzzwords.",
+    ),
+}
+
+
 def concat_scenes(scene_paths: list[Path], out_path: Path) -> tuple[bool, str]:
     """Concatenate an ordered list of mp4s into one mp4.
 
@@ -1266,6 +1575,35 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
             job["ref_slug"] = info.get("slug")
             save_jobs(JOBS)
 
+    # ==== Public-figure voice-clone detection ====
+    # Same trigger as the reference-frame fast-path: if the prompt names a
+    # public figure we've cloned a voice for, remember the voice_id + style
+    # hint here so _render_scene can override MiniMax's synthesized narrator
+    # with Grok-written dialogue in the cloned voice. When nothing matches,
+    # figure_voice_id stays None and scenes ship with MiniMax audio.
+    figure_voice_id: str | None = None
+    figure_display_name: str | None = None
+    figure_style_hint: str | None = None
+    try:
+        fig_slug = _match_public_figure(prompt)
+    except Exception:  # noqa: BLE001
+        fig_slug = None
+    if fig_slug and ELEVENLABS_API_KEY:
+        vid = _FIGURE_VOICES.get(fig_slug)
+        style_entry = _FIGURE_STYLES.get(fig_slug)
+        if vid and style_entry:
+            figure_voice_id = vid
+            figure_display_name, figure_style_hint = style_entry
+            print(
+                f"[voice] job {job_id}: public figure detected slug={fig_slug} "
+                f"voice_id={vid} — will override scene audio with cloned voice"
+            )
+            _jobx = JOBS.get(job_id)
+            if _jobx is not None:
+                _jobx["voice_clone_slug"] = fig_slug
+                _jobx["voice_clone_voice_id"] = vid
+                save_jobs(JOBS)
+
     # scene_states tracks the status string reported by fal for each scene
     # so we can compute an aggregate progress signal for the UI.
     scene_states: dict[int, str] = {i: "queued" for i in range(len(scenes))}
@@ -1493,6 +1831,50 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
                     else:
                         print(f"[render {job_id}] scene {idx} still bad after retry; shipping anyway")
                     ok, err = ok2, err2
+
+        # ==== Voice-clone swap ====
+        # If this render is for a public figure we've cloned (Scott Adams,
+        # etc.), replace MiniMax's synthesized narrator with the cloned
+        # voice: Grok writes a short in-character line for the scene, we
+        # TTS it via ElevenLabs, and ffmpeg swaps the audio track. Any
+        # failure at any step just leaves the MiniMax audio in place —
+        # the scene still ships.
+        if (
+            ok
+            and scene_out.exists()
+            and figure_voice_id
+            and figure_display_name
+            and figure_style_hint
+        ):
+            line = _grok_scene_dialogue(
+                figure_display_name,
+                figure_style_hint,
+                scene_prompt,
+                dur,
+            )
+            if line:
+                voice_out = scene_dir / f"scene_{idx:02d}_voice.mp3"
+                if _tts_elevenlabs(line, figure_voice_id, voice_out):
+                    if _mux_voice_over_video(scene_out, voice_out):
+                        print(
+                            f"[voice] job {job_id} scene {idx}: swapped in cloned "
+                            f"voice ({len(line)} chars): {line[:80]!r}"
+                        )
+                        # Now realign the mouth to match the new audio. Uses
+                        # sync-labs/lipsync-2 via fal (~10-30s per scene).
+                        # On failure we keep the voice-swapped video with
+                        # mismatched lips — audio still sounds like Scott,
+                        # just lips will be off.
+                        if _fal_lipsync(scene_out, voice_out, job_id, idx):
+                            print(f"[voice] job {job_id} scene {idx}: lip-sync pass succeeded")
+                        else:
+                            print(f"[voice] job {job_id} scene {idx}: lip-sync pass failed, kept unsynced video")
+                    else:
+                        print(f"[voice] job {job_id} scene {idx}: mux failed, kept MiniMax audio")
+                else:
+                    print(f"[voice] job {job_id} scene {idx}: TTS failed, kept MiniMax audio")
+            else:
+                print(f"[voice] job {job_id} scene {idx}: Grok returned no dialogue, kept MiniMax audio")
 
         # Terminal state update (render_one_scene doesn't call on_status on exit)
         scene_states[idx] = "succeeded" if ok else "failed"
