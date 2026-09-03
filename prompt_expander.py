@@ -1011,12 +1011,37 @@ def expand_prompt(
         return _ensure_opener(_fallback(prompt, scene_durations, t0, f"invalid JSON: {e}"))
 
     scenes = parsed.get("scenes") or []
-    if not isinstance(scenes, list) or len(scenes) != n:
-        print(f"[expand] wrong scene count ({provider_name}) expected={n} got={len(scenes) if isinstance(scenes, list) else type(scenes).__name__}", flush=True)
+    if not isinstance(scenes, list):
+        print(f"[expand] scenes not a list ({provider_name}) got={type(scenes).__name__}", flush=True)
         return _ensure_opener(_fallback(
             prompt, scene_durations, t0,
-            f"expected {n} scenes, got {len(scenes) if isinstance(scenes, list) else type(scenes).__name__}"
+            f"scenes not a list: {type(scenes).__name__}"
         ))
+
+    # Tolerate off-by-a-few counts from the LLM (Grok returns 59/60 or 61/60
+    # about 20% of the time on long-form). Pad short lists by re-using the
+    # last scene's beat description with a fresh scene index; truncate long
+    # lists. Only fall back if the count is wildly wrong (>10% off).
+    if len(scenes) != n:
+        gap = abs(len(scenes) - n)
+        if gap > max(3, n // 10):
+            print(f"[expand] wrong scene count ({provider_name}) expected={n} got={len(scenes)} -- FALLBACK", flush=True)
+            return _ensure_opener(_fallback(
+                prompt, scene_durations, t0,
+                f"expected {n} scenes, got {len(scenes)}"
+            ))
+        print(f"[expand] scene count off-by-{gap} ({provider_name}) expected={n} got={len(scenes)} -- reconciling", flush=True)
+        if len(scenes) > n:
+            scenes = scenes[:n]
+        else:
+            # Pad by duplicating the last scene text (rare tag/closing beat)
+            # with a rewritten scene marker. Better than a fallback that
+            # rewrites all 60 scenes with the paperweight prompt.
+            last = scenes[-1] if scenes else ""
+            for i in range(len(scenes), n):
+                # Re-use last beat but re-index. This preserves the actual
+                # LLM-generated content instead of nuking the whole render.
+                scenes.append(last)
 
     # Normalize each scene to a str and cap length so we don't blow past
     # MiniMax's prompt limit.
