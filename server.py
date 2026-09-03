@@ -2187,6 +2187,16 @@ def multi_scene_worker(job_id: str, initial_ref_data_url: str | None) -> None:
                 j2["cast"] = cast_names
             save_jobs(JOBS)
 
+        # User multi-select override: if the picker returned N cast tiles the
+        # user explicitly clicked (e.g. Trump + Milei + Trudeau in an
+        # ensemble parody), those trump the auto-cast resolution above.
+        # Cap at 3 -- nano-banana's image_urls limit.
+        job_rec_now = JOBS.get(job_id) or {}
+        picked_refs = job_rec_now.get("extra_ref_urls") or []
+        if isinstance(picked_refs, list) and len(picked_refs) >= 2:
+            keyframe_refs = [u for u in picked_refs if isinstance(u, str) and u.startswith("http")][:3]
+            print(f"[render {job_id}] scene 0 using {len(keyframe_refs)} USER-PICKED ref(s) (multi-select override)")
+
         # Fall back to the user-picked reference (group cast frame or user
         # upload) when we don't have character-specific refs.
         if not keyframe_refs:
@@ -4242,6 +4252,7 @@ async def generate(
     # picked one, and now hands us the pre-approved data. Both optional so the
     # legacy single-step path (no preview) still works.
     chosen_ref_url: str = Form(""),
+    chosen_ref_urls: str = Form(""),  # JSON list[str] for multi-select cast
     chosen_scenes: str = Form(""),   # JSON array of scene prompt strings
     chosen_outline: str = Form(""),  # JSON outline dict from /api/plan (long form)
 ):
@@ -4449,6 +4460,60 @@ async def generate(
     # NB: If no upload and no chosen_ref_url, the legacy path still applies:
     # multi_scene_worker will call resolve_franchise_ref itself before scene 1
     # so /api/generate stays fast.
+
+    # Multi-select cast anchors. When the user picked multiple leader tiles
+    # in the pre-approval picker (e.g. Trump + Milei + Trudeau), the frontend
+    # posts a JSON list here. We download each URL to /static/franchise-refs/
+    # (same as the single chosen_ref_url path so fal has hotlink-free URLs)
+    # and stash them on the job record for multi_scene_worker to feed to the
+    # scene-0 keyframe blender. The single ref_url stays the primary anchor
+    # (top pick, first in the list) for backward compat with legacy code.
+    extra_ref_urls: list[str] = []
+    if chosen_ref_urls:
+        try:
+            _picks = json.loads(chosen_ref_urls)
+        except Exception as e:  # noqa: BLE001
+            print(f"[generate] chosen_ref_urls parse failed: {e}")
+            _picks = []
+        if isinstance(_picks, list) and PUBLIC_ORIGIN:
+            seen: set[str] = set()
+            for idx, u in enumerate(_picks):
+                if not isinstance(u, str) or not u.startswith("http"):
+                    continue
+                # Skip the first pick if it matches the primary ref_url we
+                # already downloaded above -- no need to re-fetch.
+                if idx == 0 and ref_url and (u == ref_url):
+                    seen.add(ref_url)
+                    extra_ref_urls.append(ref_url)
+                    continue
+                if u in seen:
+                    continue
+                seen.add(u)
+                # Same download-and-serve dance as chosen_ref_url so nano-
+                # banana gets URLs from PUBLIC_ORIGIN (no third-party CDN 403s).
+                try:
+                    _dl = _download_and_validate(u)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[generate] chosen_ref_urls[{idx}] download crashed: {e}")
+                    _dl = None
+                if _dl is None:
+                    # Fallback: if it's already an http(s) URL, just pass through.
+                    extra_ref_urls.append(u)
+                    continue
+                blob, ext = _dl
+                out = FRANCHISE_REFS / f"chosen_{job_id}_{idx}.{ext}"
+                try:
+                    out.write_bytes(blob)
+                    extra_ref_urls.append(f"{PUBLIC_ORIGIN}/static/franchise-refs/{out.name}")
+                except Exception as e:  # noqa: BLE001
+                    print(f"[generate] chosen_ref_urls[{idx}] cache write failed: {e}")
+                    extra_ref_urls.append(u)
+            # If the primary ref_url wasn't already the first pick, prepend it
+            # so scene-0 sees primary + extras in a sensible order.
+            if ref_url and ref_url not in extra_ref_urls:
+                extra_ref_urls.insert(0, ref_url)
+            print(f"[generate] multi-select cast: {len(extra_ref_urls)} refs -> {extra_ref_urls[:4]}")
+
     JOBS[job_id] = {
         "id": job_id,
         "prompt": prompt.strip(),
@@ -4464,6 +4529,7 @@ async def generate(
         "user_email": user_email,
         "ref_source": ref_source,
         "ref_url": ref_url,
+        "extra_ref_urls": extra_ref_urls,
         "preapproved_scene_prompts": preapproved_scene_prompts,
         "preapproved_outline": preapproved_outline,
         "credits_debited": credits_debited,  # for refund on failure

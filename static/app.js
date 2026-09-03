@@ -844,8 +844,19 @@ function renderRefTiles(cands) {
       div.addEventListener("click", () => {
         // Don't allow selecting broken tiles — they'd fail at generate time.
         if (div.classList.contains("preview-ref-broken")) return;
-        el.previewRefs.querySelectorAll(".preview-ref").forEach((n) => n.classList.remove("selected"));
-        div.classList.add("selected");
+        // Multi-select toggle: click a tile to add it to the cast, click
+        // again to remove. When 'figure' (public-figure) candidates are
+        // present we treat every tile as independently pickable so an
+        // 8-leader Office parody can lock all 8 identities. For 'search'
+        // and 'cache' tiles (traditional single group cast frame) we keep
+        // radio-style behavior so old flows aren't surprised.
+        const isFigure = (c.source === "figure");
+        if (isFigure) {
+          div.classList.toggle("selected");
+        } else {
+          el.previewRefs.querySelectorAll(".preview-ref").forEach((n) => n.classList.remove("selected"));
+          div.classList.add("selected");
+        }
       });
       el.previewRefs.appendChild(div);
     });
@@ -1060,7 +1071,8 @@ el.previewApproveBtn.addEventListener("click", async () => {
     showPreviewError("Already submitting \u2014 hang tight.");
     return;
   }
-  const selected = el.previewRefs.querySelector(".preview-ref.selected");
+  const selectedNodes = Array.from(el.previewRefs.querySelectorAll(".preview-ref.selected"));
+  const selected = selectedNodes[0] || null;
   // A reference image is required. If the user didn't have an upload
   // already in the composer AND hasn't picked a candidate, stop them
   // here with a friendly nudge rather than letting the backend 400.
@@ -1086,6 +1098,7 @@ el.previewApproveBtn.addEventListener("click", async () => {
     return;
   }
   const chosenRefUrl = selected ? selected.dataset.url : "";
+  const chosenRefUrls = selectedNodes.map((n) => n.dataset.url);
 
   // Two-mode collection: outline card (long form) vs storyboard textareas
   // (short form). Only one is present in the DOM at a time.
@@ -1113,6 +1126,7 @@ el.previewApproveBtn.addEventListener("click", async () => {
       duration: pendingPlan._duration,
       resolution: pendingPlan._resolution,
       chosenRefUrl,
+      chosenRefUrls,
       chosenScenes,
       chosenOutline,
     });
@@ -1127,13 +1141,16 @@ el.previewApproveBtn.addEventListener("click", async () => {
   }
 });
 
-async function submitGenerate({ prompt, duration, resolution, chosenRefUrl, chosenScenes, chosenOutline }) {
+async function submitGenerate({ prompt, duration, resolution, chosenRefUrl, chosenRefUrls, chosenScenes, chosenOutline }) {
   const fd = new FormData();
   fd.append("prompt", prompt);
   fd.append("duration", String(duration));
   fd.append("resolution", resolution || document.querySelector('input[name="resolution"]:checked').value);
   if (pendingUpload) fd.append("reference", pendingUpload);
   if (chosenRefUrl) fd.append("chosen_ref_url", chosenRefUrl);
+  if (chosenRefUrls && chosenRefUrls.length > 1) {
+    fd.append("chosen_ref_urls", JSON.stringify(chosenRefUrls));
+  }
   if (chosenScenes) fd.append("chosen_scenes", JSON.stringify(chosenScenes));
   if (chosenOutline) fd.append("chosen_outline", JSON.stringify(chosenOutline));
 
