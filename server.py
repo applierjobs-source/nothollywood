@@ -3865,7 +3865,13 @@ async def plan(
     # frames came back" dialog. Match aliases first and seed the baked-in
     # reference as the sole candidate so the user sees their curated ref
     # at the top of the picker and can hit Generate immediately.
-    figure = _match_public_figure(prompt)
+    # Multi-figure ensemble path: match EVERY curated public figure the
+    # prompt names and expose one candidate per leader. Previously we only
+    # returned the dominant figure, so an 8-leader Office parody rendered
+    # a Trump-only picker while the other 7 were silently dropped.
+    from franchise_ref import _match_all_public_figures
+    all_figures = _match_all_public_figures(prompt)
+    figure = all_figures[0] if all_figures else None
     info = None
     if not figure:
         # Show detection. Skip candidate search on a miss and return an empty
@@ -3880,26 +3886,29 @@ async def plan(
     candidates: list[dict] = []
     slug: str | None = None
     if figure:
-        # Public figure path: serve the baked-in ref directly (no DDG
-        # search, no Grok Imagine fallback). If somehow the file is
-        # missing on disk we fall through to an empty candidate list and
-        # let the user upload their own.
+        # Public figure path: serve the baked-in ref for EVERY matched figure
+        # (no DDG search, no Grok Imagine fallback). Slug is the top-of-list
+        # figure so the storyboard header still shows a sensible title.
         _canonical, slug = figure
         if PUBLIC_ORIGIN:
-            for prefix in ("v2-", ""):
-                for ext in ("png", "jpg", "webp"):
-                    cached = FRANCHISE_REFS / f"{prefix}{slug}.{ext}"
-                    if cached.exists() and cached.stat().st_size >= 5_000:
-                        candidates.append({
-                            "url": f"{PUBLIC_ORIGIN}/static/franchise-refs/{cached.name}",
-                            "thumbnail": f"{PUBLIC_ORIGIN}/static/franchise-refs/{cached.name}",
-                            "width": 0,
-                            "height": 0,
-                            "source": "figure",
-                        })
+            for _fig_canonical, _fig_slug in all_figures:
+                for prefix in ("v2-", ""):
+                    _found = False
+                    for ext in ("png", "jpg", "webp"):
+                        cached = FRANCHISE_REFS / f"{prefix}{_fig_slug}.{ext}"
+                        if cached.exists() and cached.stat().st_size >= 5_000:
+                            candidates.append({
+                                "url": f"{PUBLIC_ORIGIN}/static/franchise-refs/{cached.name}",
+                                "thumbnail": f"{PUBLIC_ORIGIN}/static/franchise-refs/{cached.name}",
+                                "width": 0,
+                                "height": 0,
+                                "source": "figure",
+                                "label": _fig_canonical,
+                            })
+                            _found = True
+                            break
+                    if _found:
                         break
-                if candidates:
-                    break
     elif title:
         slug = _slugify_title(title)
         # Serve any pre-baked cache hit as the first option so users see

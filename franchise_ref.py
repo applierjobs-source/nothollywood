@@ -1033,6 +1033,61 @@ def _match_public_figure(prompt: str) -> Optional[tuple[str, str]]:
     return (canonical, slug)
 
 
+def _match_all_public_figures(prompt: str) -> list[tuple[str, str]]:
+    """Return [(canonical_name, slug), ...] for EVERY curated public figure
+    named in the prompt, ordered by prominence (mention count desc, then
+    first-mention position asc).
+
+    Used by /api/plan to build the reference-frame picker so ensemble
+    prompts (e.g. Trump + Milei + Trudeau + Meloni + Putin + Merkel + Kim
+    + Macron) show a photo per leader instead of just the top-scored one.
+
+    Same scoring rules as _match_public_figure, applied to every slug that
+    matched at least once.
+    """
+    if not prompt:
+        return []
+    import re as _re
+    lowered = prompt.lower()
+
+    scores: dict[str, dict] = {}
+    consumed: list[tuple[int, int]] = []
+
+    def _overlaps(start: int, end: int) -> bool:
+        for cs, ce in consumed:
+            if start < ce and cs < end:
+                return True
+        return False
+
+    for alias in sorted(_PUBLIC_FIGURE_ALIASES.keys(), key=len, reverse=True):
+        slug = _PUBLIC_FIGURE_ALIASES[alias]
+        pat = _re.compile(rf"\b{_re.escape(alias)}\b")
+        for m in pat.finditer(lowered):
+            s, e = m.span()
+            if _overlaps(s, e):
+                continue
+            consumed.append((s, e))
+            rec = scores.setdefault(slug, {"count": 0, "first_pos": s, "slug": slug})
+            rec["count"] += 1
+            if s < rec["first_pos"]:
+                rec["first_pos"] = s
+
+    if not scores:
+        return []
+
+    # Order: highest count first, then earliest first-mention.
+    ordered = sorted(
+        scores.values(),
+        key=lambda r: (-r["count"], r["first_pos"]),
+    )
+    out: list[tuple[str, str]] = []
+    for rec in ordered:
+        slug = rec["slug"]
+        canonical = " ".join(w.capitalize() for w in slug.split("-"))
+        out.append((canonical, slug))
+    return out
+
+
 def resolve_franchise_ref(
     prompt: str,
     *,
