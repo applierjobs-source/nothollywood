@@ -3393,7 +3393,7 @@ def debug_recent_renders(hours: int = 24, limit: int = 30):
             "user_email": email_by_id.get(row.get("user_id", ""), ""),
             "user_id_short": (row.get("user_id") or "")[:8],
             "created_at": row.get("created_at"),
-            "prompt": (row.get("prompt") or "")[:200],
+            "prompt": (row.get("prompt") or "")[:4000],
             "duration": row.get("duration"),
             "resolution": row.get("resolution"),
             "title": row.get("title"),
@@ -3717,6 +3717,41 @@ def cast_probe(prompt: str, show: str = ""):
         )
         refs.append({"character": ch, "ref_url": u})
     out["refs"] = refs
+    return out
+
+
+@app.get("/api/_debug/outline_probe")
+def outline_probe(prompt: str, duration: int = 600):
+    """Unauthed probe that runs plan_outline() + expand_prompt() and returns
+    the outline + scene prompts the LLM produced. Use this to inspect the
+    'every scene is about a paperweight' failure mode without burning a
+    full render.
+    """
+    import traceback, time
+    from prompt_expander import plan_outline, expand_prompt
+    out = {"prompt": prompt, "duration": duration}
+    try:
+        t0 = time.time()
+        outline_r = plan_outline(prompt, duration_s=duration)
+        out["outline_ms"] = int((time.time() - t0) * 1000)
+        out["outline"] = outline_r
+
+        scenes_plan = plan_scenes(duration)
+        out["scenes_plan"] = scenes_plan
+
+        t1 = time.time()
+        expansion = expand_prompt(prompt, scenes_plan, outline=outline_r.get("outline"))
+        out["expand_ms"] = int((time.time() - t1) * 1000)
+        out["expand"] = {
+            "provider": expansion.get("provider"),
+            "style": expansion.get("style"),
+            "characters": expansion.get("characters"),
+            "shot_bible": expansion.get("shot_bible"),
+            "scenes": expansion.get("scenes"),
+        }
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+        out["tb"] = traceback.format_exc()[-2000:]
     return out
 
 
