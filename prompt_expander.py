@@ -1100,12 +1100,24 @@ def expand_prompt(
         and _hero_prop_raw.strip().lower() not in ("null", "none")
         and len(scenes_norm) >= 6
     ):
+        # PAPERWEIGHT TYRANNY FIX (2026-09-02): for long-form (>=6 scenes)
+        # a hero_prop lock injected into every scene's SHOT BIBLE header
+        # causes every scene to render the same object, because MiniMax
+        # H3 hard-anchors on the most-specific noun in the prompt. The
+        # wardrobe/locations parts of the bible do the actually-useful
+        # consistency work; the hero_prop is where the tyranny comes
+        # from. Strip it for long-form and note it in the response so
+        # the frontend can show 'hero_prop suppressed for long-form'.
+        # Short-form (< 6 scenes) still gets the prop lock -- it's
+        # helpful when the object IS the whole story.
         print(
-            f"[shot_bible] WARN long-form render with hero_prop set "
-            f"(n_scenes={len(scenes_norm)}) — verify beats aren't all about "
-            f"this prop: {_hero_prop_raw.strip()[:200]!r}",
+            f"[shot_bible] STRIPPING hero_prop for long-form render "
+            f"(n_scenes={len(scenes_norm)}) prop was: "
+            f"{_hero_prop_raw.strip()[:200]!r}",
             flush=True,
         )
+        shot_bible["hero_prop_original"] = _hero_prop_raw.strip()
+        shot_bible["hero_prop"] = None
     # If the LLM omitted the field entirely but we have franchise location
     # cards, seed the bible with just the location cards actually referenced
     # in the scene prompts. Including all four Seinfeld locations when only
@@ -1401,6 +1413,11 @@ Rules:
   chase, contraband, a broken thing that needs fixing), some scenes must
   still be about characters reacting, other characters' subplots, or
   location-change beats where the object is offscreen or incidental.
+- COLD OPEN OBJECTS ARE NOT THE STORY. When the user's prompt says
+  something like "Cold open: character announces a new X", the object X
+  is the *cold open bit*, NOT the plot of the whole short. Use X ONLY
+  in the cold_open and tag (2 beats). The A-story must be about
+  something ELSE. Do NOT let a cold-open hint become the A-story spine.
 - If the user's prompt is a franchise show (Seinfeld, The Office, Family
   Guy, South Park, etc.), cast the outline from that show's canonical
   characters. Use the group whose absence would make the episode NOT feel
