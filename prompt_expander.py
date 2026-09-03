@@ -120,7 +120,13 @@ scene prompt downstream:
   {
     "hero_prop": "one sentence exact visual description of the plot object, \
 repeated verbatim in every scene where it appears (color, shape, silhouette, \
-material, brand markings). Null if the story has no single hero object.",
+material, brand markings). SET THIS TO null UNLESS one specific physical \
+object is the McGuffin the whole episode is chasing (e.g. the contraband \
+muffin, the stolen laptop, the ring in the sink). DO NOT set hero_prop \
+because the manager occasionally holds a paperweight or the character \
+has a favorite mug — those are wardrobe/prop dressing, not the plot object. \
+When in doubt, set it to null; a spurious hero_prop makes every scene \
+collapse into being about that object.",
     "wardrobe": {
       "<character name>": "one sentence outfit lock for the whole episode \
 (garments, colors, footwear, glasses, watches, facial hair). Sitcom \
@@ -135,10 +141,23 @@ signage). Use the franchise location cards below verbatim when they apply."
   }
 
 Every scene prompt you write MUST already reference the hero prop's exact \
-description (not just "the shoes" — the FULL description) whenever the prop \
-is on screen, the character's wardrobe lock whenever the character is on \
+description (not just "the shoes" — the FULL description) WHEN THE PROP IS \
+ACTUALLY ON SCREEN IN THAT BEAT (not every scene — the prop is offscreen \
+for many beats), the character's wardrobe lock whenever the character is on \
 screen, and the location spec whenever the scene sets there. Don't rely on \
 the model to remember from scene 1 — it can't.
+
+SCENE VARIETY IS MANDATORY. Every scene must be materially different from \
+the previous scene in at least two of: (a) location — don't stack 5 scenes \
+in the same bullpen; move to conference room, break room, parking lot, \
+interview talking-head insert, exterior, character's home; (b) camera \
+angle — pick from: wide establishing, medium two-shot, over-the-shoulder, \
+close-up reaction, dutch tilt, low-angle hero, high-angle scene overview, \
+handheld POV, mockumentary talking-head interview to camera; (c) character \
+configuration — don't put the manager center-frame in every scene, some \
+scenes are supporting characters alone, some are two-handers, some are \
+reaction cutaways. Explicitly state the shot type and camera angle in \
+EACH scene prompt. Repeated composition kills the episode.
 
 ON-SCREEN TEXT RULE (very important):
 - Text-in-image models frequently render garbled gibberish signage \
@@ -1025,6 +1044,27 @@ def expand_prompt(
     shot_bible = parsed.get("shot_bible") or {}
     if not isinstance(shot_bible, dict):
         shot_bible = {}
+
+    # Safety net for the paperweight-tyranny bug (render 2e6304831339,
+    # 2026-09-02): a spurious hero_prop was locked into every scene, so the
+    # whole 10-minute Trump-Office parody was Trump pitching a paperweight
+    # variant. Long-form (>60s / >~6 scenes) with a hero_prop is a red flag,
+    # log it loudly to Railway so we can inspect the outline. We don't strip
+    # the prop — sometimes it's legit (contraband muffin, stolen laptop) —
+    # we just make the anti-pattern visible.
+    _hero_prop_raw = shot_bible.get("hero_prop")
+    if (
+        isinstance(_hero_prop_raw, str)
+        and _hero_prop_raw.strip()
+        and _hero_prop_raw.strip().lower() not in ("null", "none")
+        and len(scenes_norm) >= 6
+    ):
+        print(
+            f"[shot_bible] WARN long-form render with hero_prop set "
+            f"(n_scenes={len(scenes_norm)}) — verify beats aren't all about "
+            f"this prop: {_hero_prop_raw.strip()[:200]!r}",
+            flush=True,
+        )
     # If the LLM omitted the field entirely but we have franchise location
     # cards, seed the bible with just the location cards actually referenced
     # in the scene prompts. Including all four Seinfeld locations when only
@@ -1276,6 +1316,20 @@ Rules:
   weaving into the A-story, not running their own separate plot.
 - Escalation is the load-bearing structure. Each beat should raise the stakes,
   reverse expectations, or deepen the character's problem.
+- BEAT VARIETY IS MANDATORY. Every beat must be a materially different action
+  in a different pocket of the world — different location OR different
+  activity OR different character configuration. If your outline reads as
+  "the manager pitches item A / the manager pitches item B / the manager
+  pitches item C" you have written ONE beat five times, not five beats. Fix
+  it. Real sitcom beats move the story forward: setup → complication → new
+  location → reversal → different character takes over → climax. If you
+  cannot describe each beat with a distinct verb and a distinct setting,
+  rewrite the outline before returning it.
+- No single physical object should appear as the focal point of more than
+  ~30% of the beats. If the story naturally centers on one object (McGuffin
+  chase, contraband, a broken thing that needs fixing), some scenes must
+  still be about characters reacting, other characters' subplots, or
+  location-change beats where the object is offscreen or incidental.
 - If the user's prompt is a franchise show (Seinfeld, The Office, Family
   Guy, South Park, etc.), cast the outline from that show's canonical
   characters. Use the group whose absence would make the episode NOT feel
@@ -1341,6 +1395,20 @@ Rules:
 - B-story must be genuinely PARALLEL — a different set of characters doing
   a different thing that pays off separately. Do NOT make the B-story a
   sub-scene of the A-story.
+- BEAT VARIETY IS MANDATORY. Every A-story and B-story beat must be a
+  materially different action in a different pocket of the world —
+  different location OR different activity OR different character
+  configuration. If your beats read as "the manager pitches item A / the
+  manager pitches item B / the manager pitches item C" you have written
+  ONE beat multiple times, not multiple beats. Fix it before returning.
+  Real sitcom beats move the story forward: setup → complication →
+  location change → reversal → different character takes over → climax.
+- No single physical object should appear as the focal point of more than
+  ~30% of the beats. If the story naturally centers on one object
+  (McGuffin chase, contraband, a broken thing that needs fixing), some
+  scenes must still be about characters reacting, other characters'
+  subplots, or location-change beats where the object is offscreen or
+  incidental.
 - The B-story can lightly cross over with the A-story in one beat if it
   serves the ending.
 - If the user's prompt is a franchise show (Seinfeld, The Office, Family
