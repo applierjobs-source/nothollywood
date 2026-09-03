@@ -87,9 +87,10 @@ def _select_provider() -> tuple[str, str, str, dict[str, str]] | None:
     return None
 
 # Timeout for the whole expansion call. The video render takes minutes, so
-# spending up to 15s here is fine, but we don't want to hang the worker if
-# Anthropic is having a bad day.
-EXPANSION_TIMEOUT = 15.0
+# spending up to 60s here is fine, but we don't want to hang the worker if
+# Anthropic is having a bad day. Longer than 15s because long-form (60+
+# scenes) prompts take ~30s to generate on Grok-4.
+EXPANSION_TIMEOUT = 90.0
 
 SYSTEM_PROMPT = """You are a prompt engineer for a text-to-video model (MiniMax H3).
 
@@ -950,22 +951,32 @@ def expand_prompt(
         f"above), scenes (array of exactly {n} strings), notes."
     )
 
+    # max_tokens sizing: each scene prompt is ~500-1200 tokens including the
+    # shot-bible header we prepend. For long-form (60 scenes) we need enough
+    # headroom that the JSON isn't truncated mid-scene, which produces an
+    # unparseable response and forces the fallback path (which copies the
+    # user's raw prompt into every scene -- the paperweight tyranny bug).
+    # Budget: ~800 tokens/scene body + outline echo + shot_bible overhead.
+    max_tokens_budget = min(64_000, max(4_096, n * 800 + 4_000))
+
     try:
         r = requests.post(
             url,
             headers=headers,
             json={
                 "model": model,
-                "max_tokens": 4096,
+                "max_tokens": max_tokens_budget,
                 "system": SYSTEM_PROMPT,
                 "messages": [{"role": "user", "content": user_msg}],
             },
             timeout=EXPANSION_TIMEOUT,
         )
     except requests.RequestException as e:
+        print(f"[expand] http error ({provider_name}) n={n} budget={max_tokens_budget}: {e}", flush=True)
         return _ensure_opener(_fallback(prompt, scene_durations, t0, f"http error ({provider_name}): {e}"))
 
     if r.status_code != 200:
+        print(f"[expand] non-200 ({provider_name}) status={r.status_code} n={n} budget={max_tokens_budget}: {r.text[:400]}", flush=True)
         return _ensure_opener(_fallback(
             prompt, scene_durations, t0,
             f"{provider_name} {r.status_code}: {r.text[:200]}"
@@ -989,14 +1000,19 @@ def expand_prompt(
     # Model sometimes wraps JSON in ```json fences even when told not to.
     m = re.search(r"\{.*\}", raw, re.DOTALL)
     if not m:
+        print(f"[expand] no JSON ({provider_name}) n={n} raw_len={len(raw)} tail={raw[-500:]!r}", flush=True)
         return _ensure_opener(_fallback(prompt, scene_durations, t0, f"no JSON in response: {raw[:200]}"))
     try:
         parsed = json.loads(m.group(0))
     except json.JSONDecodeError as e:
+        # Common cause: response truncated mid-object because max_tokens was
+        # too low. Log the tail so we can see whether it looks truncated.
+        print(f"[expand] invalid JSON ({provider_name}) n={n} err={e} raw_len={len(raw)} tail={raw[-500:]!r}", flush=True)
         return _ensure_opener(_fallback(prompt, scene_durations, t0, f"invalid JSON: {e}"))
 
     scenes = parsed.get("scenes") or []
     if not isinstance(scenes, list) or len(scenes) != n:
+        print(f"[expand] wrong scene count ({provider_name}) expected={n} got={len(scenes) if isinstance(scenes, list) else type(scenes).__name__}", flush=True)
         return _ensure_opener(_fallback(
             prompt, scene_durations, t0,
             f"expected {n} scenes, got {len(scenes) if isinstance(scenes, list) else type(scenes).__name__}"
@@ -1164,12 +1180,21 @@ def _speech_hint(prompt: str) -> str:
     Detects animal-talking prompts too, since MiniMax H3 defaults to bark/meow
     on non-first scenes even when scene 1 has clear speech.
     """
+    import re as _re
     p = prompt.lower()
-    if not any(kw in p for kw in _SPEECH_KEYWORDS):
+    # Use whole-word regex, not substring `in`. Previously matched 'pet'
+    # inside 'carpet' and 'cat' inside 'communicate', turning a Trump-Office
+    # parody into 'AUDIO REQUIREMENT: the animal speaks conversational English'.
+    tokens = set(_re.findall(r"[a-z']+", p))
+    speech_tokens = {kw for kw in _SPEECH_KEYWORDS if " " not in kw}
+    speech_phrases = {kw for kw in _SPEECH_KEYWORDS if " " in kw}
+    has_speech = bool(tokens & speech_tokens) or any(ph in p for ph in speech_phrases)
+    if not has_speech:
         return ""
-    # Animal-speaking? Extra emphasis — the model needs pushing here.
-    animal_words = ("dog", "cat", "bird", "puppy", "kitten", "parrot", "pet")
-    is_animal = any(a in p for a in animal_words)
+    animal_words = {"dog", "dogs", "cat", "cats", "bird", "birds",
+                    "puppy", "puppies", "kitten", "kittens",
+                    "parrot", "parrots", "pet", "pets"}
+    is_animal = bool(tokens & animal_words)
     lang = "English"
     for kw, name in (("spanish", "Spanish"), ("french", "French"),
                      ("japanese", "Japanese"), ("german", "German")):
@@ -1193,29 +1218,50 @@ def _speech_hint(prompt: str) -> str:
 def _fallback(prompt: str, scene_durations: list[int], t0: float, error: str) -> dict[str, Any]:
     """Fallback: build per-scene prompts the same way we did before expansion.
 
-    We still return the same shape so multi_scene_worker doesn't need branches —
-    it just consumes `scenes` regardless of provider.
+    We still return the same shape so multi_scene_worker doesn't need branches
+    -- it just consumes `scenes` regardless of provider.
 
     Even in the fallback path we inject the franchise audio signature and a
     lightweight editorial cue for the first and last scene, so a fallback
     render doesn't lose the laugh-track/music behavior when the LLM is down.
+
+    WARNING: this is a graceful-degradation path, not a real story generator.
+    It appends the user's raw prompt to every scene, which means every scene
+    describes the SAME action -- if the user's prompt mentions a specific
+    hook (e.g. 'Cold open: Trump announces the paperweight line') every
+    scene rehashes that hook. Prefer letting the LLM path succeed; the
+    caller logs a WARN when we land here so we can fix the real cause.
     """
+    print(f"[expand] FALLBACK triggered n_scenes={len(scene_durations)} error={error!r}", flush=True)
     n = len(scene_durations)
     hint = _known_character_hint(prompt) or ""
     audio_hint = _speech_hint(prompt)
     audio_sig = _franchise_audio_signature(prompt) or ""
+    # Rotate through basic shot descriptors so at least the camera isn't
+    # identical on every fallback scene. This is a bandaid, not a fix -- the
+    # real fix is not landing in fallback for long-form renders.
+    shot_bank = [
+        "Wide establishing shot of the setting.",
+        "Medium two-shot of the primary characters in conversation.",
+        "Over-the-shoulder shot on the reacting character.",
+        "Close-up reaction shot on the character's face.",
+        "Handheld mockumentary talking-head interview direct to camera.",
+        "High-angle overview showing the whole room.",
+        "Low-angle hero shot on the character delivering the line.",
+        "Cutaway insert of a supporting character reacting alone.",
+    ]
     scenes = []
     for i in range(n):
+        shot = shot_bank[i % len(shot_bank)]
         s = (
             f"Scene {i+1} of {n} in a continuous story. "
+            f"{shot} "
             f"Maintain the exact same characters, wardrobe, setting, and visual style throughout. "
         )
         if audio_hint:
             s += audio_hint
         if audio_sig:
             s += audio_sig + " "
-        # Cold-open/tag editorial cues so the first and last scenes have the
-        # theme sting even without the LLM's help.
         if i == 0 and audio_sig:
             s += "Open with the show's theme/music sting briefly under the opening beat. "
         if i == n - 1 and audio_sig:
