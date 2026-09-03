@@ -715,14 +715,93 @@ _TRANSITION_GUIDANCE = (
 )
 
 
+# Style-only descriptions of the same franchises — palette, lighting, camera,
+# animation medium — with NO character appearance data. Used when the user
+# is doing a cast substitution like 'Trump as Michael Scott' where injecting
+# the original character's appearance would fight the substitute's face.
+_FRANCHISE_STYLE_ONLY = {
+    "south park": "South Park style: flat cutout construction-paper animation, "
+    "bright saturated colors, minimal shading, rough paper edges, 2D flat "
+    "perspective, Colorado mountain-town setting.",
+    "family guy": "Family Guy style: flat 2D cartoon animation, thick black "
+    "outlines, bright flat colors, suburban living-room and street settings.",
+    "the simpsons": "Simpsons style: flat 2D cartoon animation, bright yellow "
+    "palette on all human characters, thick black outlines, Springfield "
+    "suburbia setting.",
+    "rick and morty": "Rick and Morty style: 2D adult-swim cartoon animation, "
+    "thick outlines, garage-workshop and interdimensional settings.",
+    "the office": "The Office (US) style: live-action mockumentary, single-camera "
+    "handheld doc-style framing, natural fluorescent office lighting, muted "
+    "beige/blue palette, gray cubicles and drop-ceiling interiors, occasional "
+    "deadpan glances to camera, natural skin tones, real cinematography of "
+    "real humans (NOT animated, NOT cartoon, NOT illustrated).",
+    "seinfeld": "Seinfeld style: live-action 90s sitcom, multi-camera, warm "
+    "apartment and diner interiors, natural skin tones, real cinematography "
+    "of real humans (NOT animated, NOT cartoon, NOT illustrated).",
+}
+
+
+_CAST_SUBSTITUTION_RE = None
+
+
+def _has_cast_substitution(prompt: str) -> bool:
+    """Detect the 'X as Y' cast substitution pattern that means the user is
+    re-casting a known franchise with different people. Returns True when a
+    known franchise role name follows 'as' in the prompt, e.g. 'Trump as
+    Michael Scott', 'Milei as Dwight', 'Trudeau is Jim'.
+
+    When True the caller should NOT inject the original franchise's character
+    appearance strings because they'll conflict with the substitute's real
+    face (e.g. Dwight's canonical bespectacled-receding-hairline description
+    fighting Milei's wild-sideburns leather-jacket appearance).
+    """
+    import re as _re
+    global _CAST_SUBSTITUTION_RE
+    if _CAST_SUBSTITUTION_RE is None:
+        # Known franchise ROLE names (not the substitutes). Match on
+        # 'as <role>' or 'is <role>' or 'plays <role>' or '<role> role'.
+        role_names = [
+            # The Office
+            "michael scott", "michael", "dwight", "dwight schrute",
+            "jim", "jim halpert", "pam", "pam beesly",
+            "stanley", "angela", "kevin", "kelly", "oscar", "toby",
+            "phyllis", "creed", "meredith", "ryan", "andy", "erin",
+            # Seinfeld
+            "jerry", "jerry seinfeld", "george", "george costanza",
+            "elaine", "kramer", "newman",
+            # Family Guy
+            "peter griffin", "peter", "lois", "stewie", "brian", "chris", "meg",
+            # Simpsons
+            "homer", "marge", "bart", "lisa", "maggie",
+            # Rick and Morty
+            "rick", "morty", "rick sanchez",
+            # South Park
+            "cartman", "stan", "kyle", "kenny",
+        ]
+        alt = "|".join(_re.escape(r) for r in sorted(role_names, key=len, reverse=True))
+        # Patterns: 'as <role>', 'is <role>', 'plays <role>', '<role> role'
+        _CAST_SUBSTITUTION_RE = _re.compile(
+            rf"\b(?:as|is|plays)\s+(?:the\s+|a\s+)?(?:{alt})\b|\b(?:{alt})\s+role\b",
+            _re.IGNORECASE,
+        )
+    return bool(_CAST_SUBSTITUTION_RE.search(prompt or ""))
+
+
 def _known_character_hint(prompt: str) -> str | None:
     """Fast keyword pre-check. If a prompt clearly references a well-known
     character catalog, we can pass a tiny extra hint to the LLM to lock in
     canonical designs. Returns None if nothing matches.
 
     This is a hint, not a gate — the LLM still writes the descriptions.
+
+    IMPORTANT: when the user is re-casting the franchise ('Trump as Michael
+    Scott', 'Milei as Dwight'), we return the STYLE-ONLY version of the
+    catalog. The original character appearance strings (Dwight's mustard
+    shirt / receding hairline) would fight the substitute's real face and
+    MiniMax H3 would render a hybrid.
     """
     p = prompt.lower()
+    substituting = _has_cast_substitution(prompt)
     catalogs = {
         "south park": "South Park characters (Cartman: chubby 8yo, red jacket, "
         "cyan/yellow bobble hat, brown pants, mittens; Stan: blue/red bobble hat, "
@@ -768,21 +847,30 @@ def _known_character_hint(prompt: str) -> str | None:
         "real cinematography of a real human being. Webcam-style medium close-up, "
         "shallow depth of field, HD video.",
     }
-    for kw, desc in catalogs.items():
+    def _pick(key: str) -> str:
+        # When re-casting, return style-only (no character appearance).
+        # Otherwise return the full catalog with canonical character looks.
+        if substituting and key in _FRANCHISE_STYLE_ONLY:
+            print(f"[character_hint] cast substitution detected — using style-only "
+                  f"catalog for '{key}' (dropping canonical character appearance)")
+            return _FRANCHISE_STYLE_ONLY[key]
+        return catalogs[key]
+
+    for kw in catalogs.keys():
         if kw in p:
-            return desc
+            return _pick(kw)
     if "cartman" in p or "kyle broflovski" in p or "kenny mccormick" in p:
-        return catalogs["south park"]
+        return _pick("south park")
     if "peter griffin" in p or "stewie" in p or "quagmire" in p:
-        return catalogs["family guy"]
+        return _pick("family guy")
     if "homer simpson" in p or "bart simpson" in p or "marge simpson" in p:
-        return catalogs["the simpsons"]
+        return _pick("the simpsons")
     if "rick sanchez" in p and ("morty" in p or "rick and" in p):
-        return catalogs["rick and morty"]
+        return _pick("rick and morty")
     if "michael scott" in p or "dwight schrute" in p or "jim halpert" in p:
-        return catalogs["the office"]
+        return _pick("the office")
     if "jerry seinfeld" in p or "george costanza" in p or "kramer" in p:
-        return catalogs["seinfeld"]
+        return _pick("seinfeld")
     return None
 
 
@@ -836,6 +924,7 @@ def expand_prompt(
     provider_name, url, model, headers = selected
 
     hint = _known_character_hint(prompt)
+    substituting = _has_cast_substitution(prompt)
     audio_sig = _franchise_audio_signature(prompt)
     loc_cards = _franchise_locations(prompt)
     user_msg = (
@@ -844,7 +933,23 @@ def expand_prompt(
         f"Per-scene durations (seconds): {scene_durations}\n"
     )
     if hint:
-        user_msg += f"\nCanonical reference for this franchise:\n{hint}\n"
+        label = "Style-only reference (do NOT copy character appearance)" if substituting else "Canonical reference for this franchise"
+        user_msg += f"\n{label}:\n{hint}\n"
+    if substituting:
+        user_msg += (
+            "\nCAST SUBSTITUTION DETECTED: The user is re-casting this franchise "
+            "with different people (patterns like 'X as Y', 'X plays Y'). In every "
+            "scene prompt you generate:\n"
+            "- Refer to characters by the SUBSTITUTE person's real name (Trump, "
+            "Milei, Trudeau, Meloni, Putin, etc.), not the original franchise "
+            "role name (Michael Scott, Dwight, Jim, Pam, Stanley).\n"
+            "- Describe each character's face, hair, build, and wardrobe using "
+            "the SUBSTITUTE person's real-world signature look, NOT the original "
+            "role's canonical outfit. 'Milei' is 'wild grey sideburns, black "
+            "leather jacket' — NOT 'mustard shirt, olive pants, receding hair.'\n"
+            "- The ONLY thing you should borrow from the original franchise is "
+            "the setting, camera style, lighting, and narrative role.\n"
+        )
     if loc_cards:
         cards_text = "\n".join(f"- {name}: {spec}" for name, spec in loc_cards.items())
         user_msg += (
@@ -1561,9 +1666,35 @@ def plan_outline(prompt: str, duration_s: int = 0) -> dict[str, Any]:
     provider_name, url, model, headers = selected
 
     hint = _known_character_hint(prompt)
+    substituting = _has_cast_substitution(prompt)
     user_msg = f"User episode idea:\n{prompt.strip()}\n"
     if hint:
-        user_msg += f"\nCanonical reference for this franchise:\n{hint}\n"
+        # Label the hint as STYLE-ONLY when we're re-casting so the LLM
+        # doesn't reach past the label and re-inject canonical character
+        # looks it already knows (Dwight = mustard shirt, receding hair).
+        label = "Style-only reference (do NOT copy character appearance)" if substituting else "Canonical reference for this franchise"
+        user_msg += f"\n{label}:\n{hint}\n"
+    if substituting:
+        user_msg += (
+            "\nCAST SUBSTITUTION DETECTED: The user is re-casting this franchise "
+            "with different people (patterns like 'X as Y', 'X plays Y'). This "
+            "is CRITICAL for the shot_bible.wardrobe field and every scene "
+            "prompt:\n"
+            "- Wardrobe MUST describe the SUBSTITUTE person's signature real-world "
+            "look, NOT the original character's canonical outfit. Example: if the "
+            "prompt says 'Milei as Dwight', wardrobe for Milei is 'wild sideburns, "
+            "black leather jacket, jeans' — NOT 'mustard shirt, brown tie, olive "
+            "pants'.\n"
+            "- Face/hair/build MUST match the substitute person (real-world "
+            "celebrity or public figure), NOT the original character. Example: "
+            "'Trump as Michael Scott' means Trump's face, orange complexion, blond "
+            "comb-over, red tie — NOT Michael Scott's dark hair and cheap suit.\n"
+            "- The ONLY thing borrowed from the original franchise is the SETTING, "
+            "CAMERA STYLE, LIGHTING, and NARRATIVE ROLE. Never the appearance.\n"
+            "- In every scene prompt, refer to characters by the SUBSTITUTE's real "
+            "name (Trump, Milei, Trudeau, Meloni) and describe them the way that "
+            "real person actually looks, so the video model renders the real face.\n"
+        )
     user_msg += f"\nTarget total duration: {duration_s}s ({outline_mode}-thread outline)."
     user_msg += "\nReturn the JSON outline."
 
