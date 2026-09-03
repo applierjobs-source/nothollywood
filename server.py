@@ -216,9 +216,18 @@ _BAKED_IN_REFS = {
     "seinfeld.png",
     "the-office.png",
     "scott-adams.png",
-    "donald-trump.jpg",
+    "scott-adams.jpg",
+    # Public figures (world leaders) -- baked into the repo so the pipeline
+    # can anchor scene-0 keyframes on real faces via nano-banana blending.
+    "donald-trump.png",  # v2 with neutral gray background; replaces old .jpg
     "vladimir-putin.jpg",
     "xi-jinping.jpg",
+    "javier-milei.png",
+    "justin-trudeau.png",
+    "giorgia-meloni.png",
+    "angela-merkel.png",
+    "kim-jong-un.png",
+    "emmanuel-macron.png",
 }
 try:
     _pruned = 0
