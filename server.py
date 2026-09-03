@@ -1211,22 +1211,10 @@ _FIGURE_STYLES: dict[str, tuple[str, str]] = {
 }
 
 
-def concat_scenes(scene_paths: list[Path], out_path: Path) -> tuple[bool, str]:
-    """Concatenate an ordered list of mp4s into one mp4.
-
-    Uses the ffmpeg concat FILTER (not the demuxer + stream copy) because
-    H3 Max scenes come back with audio durations that don't always match
-    video duration to the frame. The concat demuxer with -c copy silently
-    accumulates drift and can drop the audio track entirely partway through
-    (bug: 57s Rick and Morty video had audio ending at 29s despite 57s of
-    video, because scene 3 had 5.5s audio for 28s video).
-
-    Per-input pipeline:
-      - Video: fps=24, even dimensions, yuv420p
-      - Audio: aresample to sync PTS, then apad + atrim to exactly match
-        the scene's video duration. Fills short-audio scenes with silence
-        rather than dropping them; the concat filter then produces one
-        continuous audio track across the entire output.
+def _concat_scene_batch(scene_paths: list[Path], out_path: Path, batch_label: str = "batch") -> tuple[bool, str]:
+    """Concat a single batch of scenes (typically <=12) via the ffmpeg
+    concat filter. Full stderr is logged to stdout on failure so Railway
+    keeps a diagnosable record; the returned error is the last 800 chars.
     """
     if not scene_paths:
         return False, "no scenes"
@@ -1240,21 +1228,18 @@ def concat_scenes(scene_paths: list[Path], out_path: Path) -> tuple[bool, str]:
         inputs += ["-i", str(path)]
         vdur, adur = _probe_video_audio_durations(path)
         if vdur <= 0:
-            return False, f"scene {i} has no readable video duration"
+            return False, f"{batch_label} scene {i} ({path.name}) has no readable video duration"
 
         filter_parts.append(
             f"[{i}:v]fps=24,scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1,format=yuv420p[v{i}]"
         )
         if adur > 0:
-            # apad extends short audio to at least vdur; atrim caps at
-            # exactly vdur so audio and video align to the same length
             filter_parts.append(
                 f"[{i}:a]aresample=async=1:first_pts=0,"
                 f"apad,atrim=duration={vdur:.6f},"
                 f"aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a{i}]"
             )
         else:
-            # Scene has no audio stream at all — synthesize silence
             filter_parts.append(
                 f"aevalsrc=0:d={vdur:.6f}:sample_rate=44100:channel_layout=stereo,"
                 f"aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a{i}]"
@@ -1276,13 +1261,82 @@ def concat_scenes(scene_paths: list[Path], out_path: Path) -> tuple[bool, str]:
                 "-movflags", "+faststart",
                 str(out_path),
             ],
-            capture_output=True, timeout=600,
+            capture_output=True, timeout=900,
         )
         if result.returncode != 0:
-            return False, result.stderr.decode(errors="ignore")[-600:]
+            full_err = result.stderr.decode(errors="ignore")
+            # Log full stderr to Railway so we can diagnose the next
+            # finalize failure without guessing.
+            print(f"[concat {batch_label}] ffmpeg failed rc={result.returncode}")
+            print(f"[concat {batch_label}] stderr (full):\n{full_err}")
+            return False, full_err[-800:]
         return True, ""
     except Exception as e:  # noqa: BLE001
+        print(f"[concat {batch_label}] exception: {e}")
         return False, str(e)
+
+
+def concat_scenes(scene_paths: list[Path], out_path: Path) -> tuple[bool, str]:
+    """Concatenate an ordered list of mp4s into one mp4.
+
+    Uses the ffmpeg concat FILTER (not the demuxer + stream copy) because
+    H3 Max scenes come back with audio durations that don't always match
+    video duration to the frame. The concat demuxer with -c copy silently
+    accumulates drift and can drop the audio track entirely partway through
+    (bug: 57s Rick and Morty video had audio ending at 29s despite 57s of
+    video, because scene 3 had 5.5s audio for 28s video).
+
+    For large renders (>12 scenes) we do chunked concat: batch scenes in
+    groups of 12, concat each batch to an intermediate mp4, then concat
+    the intermediates. A single-shot 60-input filter graph was blowing
+    up ffmpeg on a 60-scene Office parody (2026-09-02 render d393aaec).
+    Chunked concat keeps every filter graph small and each intermediate
+    already normalized (24fps, yuv420p, 44100Hz stereo aac) so the final
+    pass is trivial.
+
+    Per-input pipeline (each batch):
+      - Video: fps=24, even dimensions, yuv420p
+      - Audio: aresample to sync PTS, then apad + atrim to exactly match
+        the scene's video duration. Fills short-audio scenes with silence
+        rather than dropping them.
+    """
+    if not scene_paths:
+        return False, "no scenes"
+
+    BATCH_SIZE = 12
+    if len(scene_paths) <= BATCH_SIZE:
+        return _concat_scene_batch(scene_paths, out_path, batch_label="single")
+
+    # Chunked path. Concat each batch to an intermediate in the parent
+    # tempdir of `out_path`, then concat all intermediates into out_path.
+    print(
+        f"[concat] chunked concat: {len(scene_paths)} scenes \u2192 "
+        f"{-(-len(scene_paths)//BATCH_SIZE)} batches of {BATCH_SIZE}"
+    )
+    intermediates: list[Path] = []
+    stem = out_path.stem
+    parent = out_path.parent
+    for batch_idx, start in enumerate(range(0, len(scene_paths), BATCH_SIZE)):
+        batch = scene_paths[start:start + BATCH_SIZE]
+        inter = parent / f"{stem}_batch{batch_idx:02d}.mp4"
+        ok, err = _concat_scene_batch(batch, inter, batch_label=f"batch{batch_idx}")
+        if not ok:
+            # Clean up any partial intermediates.
+            for p in intermediates:
+                try: p.unlink()
+                except Exception: pass
+            return False, f"batch {batch_idx} ({len(batch)} scenes): {err}"
+        intermediates.append(inter)
+
+    # Final pass: concat the intermediates. Because every intermediate
+    # was already normalized to the same codec profile, this graph is
+    # small (<=8 inputs for a 96-scene render) and reliable.
+    ok, err = _concat_scene_batch(intermediates, out_path, batch_label="final")
+    # Clean up intermediates regardless of outcome.
+    for p in intermediates:
+        try: p.unlink()
+        except Exception: pass
+    return ok, err
 
 
 WATERMARK_PATH = ROOT / "watermark.png"
