@@ -936,17 +936,56 @@ _PUBLIC_FIGURE_ALIASES: dict[str, str] = {
     # Xi Jinping — baked-in official portrait.
     "xi jinping": "xi-jinping",
     "president xi": "xi-jinping",
+    # Aliases below are known world leaders users cast in ensemble shorts.
+    # They currently have NO baked-in reference image on disk, so a match
+    # here logs 'no ref file' and falls through to the show/generic
+    # pipeline. Kept in the table so the frontend can list them as
+    # curated figures and so a future ref-image drop lights them up
+    # automatically without a code change.
+    "javier milei": "javier-milei",
+    "milei": "javier-milei",
+    "justin trudeau": "justin-trudeau",
+    "trudeau": "justin-trudeau",
+    "giorgia meloni": "giorgia-meloni",
+    "meloni": "giorgia-meloni",
+    "angela merkel": "angela-merkel",
+    "merkel": "angela-merkel",
+    "kim jong un": "kim-jong-un",
+    "kim jong-un": "kim-jong-un",
+    "emmanuel macron": "emmanuel-macron",
+    "macron": "emmanuel-macron",
+    "joe biden": "joe-biden",
+    "biden": "joe-biden",
+    "barack obama": "barack-obama",
+    "obama": "barack-obama",
+    "benjamin netanyahu": "benjamin-netanyahu",
+    "netanyahu": "benjamin-netanyahu",
+    "volodymyr zelensky": "volodymyr-zelensky",
+    "zelensky": "volodymyr-zelensky",
+    "narendra modi": "narendra-modi",
+    "modi": "narendra-modi",
+    "keir starmer": "keir-starmer",
+    "starmer": "keir-starmer",
 }
 
 
 def _match_public_figure(prompt: str) -> Optional[tuple[str, str]]:
-    """Return (canonical_name, slug) if the prompt names a curated public
-    figure. Case-insensitive word-boundary match.
+    """Return (canonical_name, slug) for the DOMINANT curated public figure
+    named in the prompt. Case-insensitive word-boundary match.
 
     Fast, deterministic, no LLM call. Runs before the show extractor so
     a prompt like 'Scott Adams reviews his coffee' auto-attaches the
     scott-adams.png reference frame even though Scott Adams isn't a TV
     show. Never raises.
+
+    Selection rule when multiple figures appear (ensemble prompts like
+    'Trump is Michael Scott, Putin is Stanley, Merkel is Angela'):
+      1) Highest mention count wins (protagonist appears most often).
+      2) Tiebreak: first mention in prompt (protagonist is usually
+         introduced first).
+    Previously the tiebreak was 'longest alias key,' which incorrectly
+    picked Putin (14 chars) over Trump (12 chars) in Zach's ensemble
+    Office parody where Trump was the boss and Putin had one beat.
 
     Uses regex word-boundaries so 'trump' matches 'Trump walks in' but
     NOT 'trumpet' or 'trumpler'.
@@ -955,15 +994,43 @@ def _match_public_figure(prompt: str) -> Optional[tuple[str, str]]:
         return None
     import re as _re
     lowered = prompt.lower()
-    # Longest alias first so 'donald trump' beats 'trump'.
+
+    # Score each slug by (total mention count, first mention position).
+    # Multiple aliases can map to the same slug (e.g. 'trump' and 'donald
+    # trump' both map to 'donald-trump') -- count all of them together.
+    # But avoid double-counting overlapping matches: 'donald trump' also
+    # matches 'trump', so we scan by the longest alias first per slug and
+    # mark matched spans consumed.
+    scores: dict[str, dict] = {}  # slug -> {count, first_pos, canonical}
+    consumed: list[tuple[int, int]] = []  # sorted spans already counted
+
+    def _overlaps(start: int, end: int) -> bool:
+        for cs, ce in consumed:
+            if start < ce and cs < end:
+                return True
+        return False
+
     for alias in sorted(_PUBLIC_FIGURE_ALIASES.keys(), key=len, reverse=True):
-        # \b before/after handles 'Trump.' 'Trump,' 'Trump!' and Trump\n.
-        # For multi-word aliases like 'donald trump' \b still fires at each end.
-        if _re.search(rf"\b{_re.escape(alias)}\b", lowered):
-            slug = _PUBLIC_FIGURE_ALIASES[alias]
-            canonical = " ".join(w.capitalize() for w in slug.split("-"))
-            return (canonical, slug)
-    return None
+        slug = _PUBLIC_FIGURE_ALIASES[alias]
+        pat = _re.compile(rf"\b{_re.escape(alias)}\b")
+        for m in pat.finditer(lowered):
+            s, e = m.span()
+            if _overlaps(s, e):
+                continue
+            consumed.append((s, e))
+            rec = scores.setdefault(slug, {"count": 0, "first_pos": s, "slug": slug})
+            rec["count"] += 1
+            if s < rec["first_pos"]:
+                rec["first_pos"] = s
+
+    if not scores:
+        return None
+
+    # Highest count wins, ties broken by earliest first mention.
+    winner = max(scores.values(), key=lambda r: (r["count"], -r["first_pos"]))
+    slug = winner["slug"]
+    canonical = " ".join(w.capitalize() for w in slug.split("-"))
+    return (canonical, slug)
 
 
 def resolve_franchise_ref(
