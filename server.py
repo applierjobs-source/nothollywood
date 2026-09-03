@@ -3744,6 +3744,8 @@ def outline_probe(prompt: str, duration: int = 600):
         out["expand_ms"] = int((time.time() - t1) * 1000)
         out["expand"] = {
             "provider": expansion.get("provider"),
+            "error": expansion.get("error"),
+            "latency_ms": expansion.get("latency_ms"),
             "style": expansion.get("style"),
             "characters": expansion.get("characters"),
             "shot_bible": expansion.get("shot_bible"),
